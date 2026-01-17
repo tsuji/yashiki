@@ -41,6 +41,9 @@ enum SubCommand {
     FocusOutput(FocusOutputCmd),
     SendToOutput(SendToOutputCmd),
     Retile(RetileCmd),
+    SetDefaultLayout(SetDefaultLayoutCmd),
+    SetLayout(SetLayoutCmd),
+    GetLayout(GetLayoutCmd),
     LayoutCmd(LayoutCmdCmd),
     ListWindows(ListWindowsCmd),
     GetState(GetStateCmd),
@@ -168,6 +171,36 @@ struct SendToOutputCmd {
 #[argh(subcommand, name = "retile")]
 struct RetileCmd {}
 
+/// Set the default layout engine
+#[derive(FromArgs)]
+#[argh(subcommand, name = "set-default-layout")]
+struct SetDefaultLayoutCmd {
+    /// layout engine name (e.g., tatami, byobu)
+    #[argh(positional)]
+    layout: String,
+}
+
+/// Set the layout engine for a tag (current tag by default)
+#[derive(FromArgs)]
+#[argh(subcommand, name = "set-layout")]
+struct SetLayoutCmd {
+    /// tag number (1-32), defaults to current tag
+    #[argh(option)]
+    tag: Option<u32>,
+    /// layout engine name
+    #[argh(positional)]
+    layout: String,
+}
+
+/// Get the current layout engine
+#[derive(FromArgs)]
+#[argh(subcommand, name = "get-layout")]
+struct GetLayoutCmd {
+    /// tag number (1-32), defaults to current layout
+    #[argh(option)]
+    tag: Option<u32>,
+}
+
 /// Send a command to the layout engine
 #[derive(FromArgs)]
 #[argh(subcommand, name = "layout-cmd")]
@@ -284,6 +317,11 @@ fn run_cli(subcmd: SubCommand) -> Result<()> {
             println!("Visible tags: {}", state.visible_tags);
             println!("Focused window: {:?}", state.focused_window_id);
             println!("Window count: {}", state.window_count);
+            println!("Default layout: {}", state.default_layout);
+            println!(
+                "Current layout: {}",
+                state.current_layout.as_deref().unwrap_or("(default)")
+            );
         }
         Response::Bindings { bindings } => {
             for b in bindings {
@@ -296,6 +334,9 @@ fn run_cli(subcmd: SubCommand) -> Result<()> {
             } else {
                 std::process::exit(1);
             }
+        }
+        Response::Layout { layout } => {
+            println!("{}", layout);
         }
     }
 
@@ -337,6 +378,12 @@ fn to_command(subcmd: SubCommand) -> Result<Command> {
             direction: parse_output_direction(&cmd.direction)?,
         }),
         SubCommand::Retile(_) => Ok(Command::Retile),
+        SubCommand::SetDefaultLayout(cmd) => Ok(Command::SetDefaultLayout { layout: cmd.layout }),
+        SubCommand::SetLayout(cmd) => Ok(Command::SetLayout {
+            tag: cmd.tag,
+            layout: cmd.layout,
+        }),
+        SubCommand::GetLayout(cmd) => Ok(Command::GetLayout { tag: cmd.tag }),
         SubCommand::LayoutCmd(cmd) => Ok(Command::LayoutCommand {
             cmd: cmd.cmd,
             args: cmd.args,
@@ -442,6 +489,35 @@ fn parse_command(args: &[String]) -> Result<Command> {
             Ok(Command::SendToOutput { direction })
         }
         "retile" => Ok(Command::Retile),
+        "set-default-layout" => {
+            if rest.is_empty() {
+                bail!("Usage: set-default-layout <layout>");
+            }
+            Ok(Command::SetDefaultLayout {
+                layout: rest[0].clone(),
+            })
+        }
+        "set-layout" => {
+            // Parse --tag option if present
+            let (tag, layout) = if rest.len() >= 3 && rest[0] == "--tag" {
+                let tag: u32 = rest[1].parse()?;
+                (Some(tag), rest[2].clone())
+            } else if rest.is_empty() {
+                bail!("Usage: set-layout [--tag <tag>] <layout>");
+            } else {
+                (None, rest[0].clone())
+            };
+            Ok(Command::SetLayout { tag, layout })
+        }
+        "get-layout" => {
+            // Parse --tag option if present
+            let tag = if rest.len() >= 2 && rest[0] == "--tag" {
+                Some(rest[1].parse()?)
+            } else {
+                None
+            };
+            Ok(Command::GetLayout { tag })
+        }
         "layout-cmd" => {
             if rest.is_empty() {
                 bail!("Usage: layout-cmd <cmd> [args...]");

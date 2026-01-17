@@ -14,7 +14,6 @@ yashiki-layout-byobu/     # Accordion layout engine (stacked windows)
 Future components:
 - `engawa/` - Status bar
 - Other layout engines: `yashiki-layout-rasen` (spiral), `yashiki-layout-koushi` (grid)
-- Per-tag layout engine switching (like river)
 
 Layout engine naming convention: `yashiki-layout-<name>` (e.g., `yashiki-layout-tatami`)
 
@@ -59,6 +58,11 @@ Like AeroSpace, uses virtual workspaces instead of macOS native Spaces:
   - Communicates via stdin/stdout JSON
   - Layout engine manages its own state (main_count, main_ratio)
   - Users can write custom layout engines
+- **Per-tag layout switching**
+  - Each tag can have a different layout engine (tatami, byobu, etc.)
+  - Layout engines are spawned lazily (on first use)
+  - `toggle_view_tag` maintains current layout, `view_tag` switches to tag's layout
+  - `view_tag_last` restores previous layout along with previous tags
 - **River-style configuration**
   - Config is a shell script (`~/.config/yashiki/init`)
   - Uses CLI commands for configuration
@@ -112,6 +116,11 @@ yashiki focus-output prev         # Focus previous display
 yashiki send-to-output next       # Move focused window to next display
 yashiki send-to-output prev       # Move focused window to previous display
 yashiki retile                    # Apply layout
+yashiki set-default-layout tatami       # Set default layout engine
+yashiki set-layout byobu                # Set layout for current tag
+yashiki set-layout --tag 2 byobu        # Set layout for specific tag
+yashiki get-layout                      # Get current layout
+yashiki get-layout --tag 2              # Get layout for specific tag
 yashiki layout-cmd set-main-ratio 0.6   # Send command to layout engine
 yashiki layout-cmd inc-main-count       # Increase main window count
 yashiki layout-cmd zoom                 # Move focused window to main area (tatami)
@@ -128,10 +137,27 @@ yashiki quit                      # Quit daemon
 ```sh
 # ~/.config/yashiki/init
 #!/bin/sh
+
+# Layout configuration (per-tag)
+yashiki set-default-layout tatami       # Default layout for all tags
+yashiki set-layout --tag 3 byobu        # Tag 3 uses byobu layout
+
+# Layout toggle script example (save as ~/.config/yashiki/toggle-layout.sh)
+# current=$(yashiki get-layout)
+# if [ "$current" = "tatami" ]; then
+#   yashiki set-layout byobu
+# else
+#   yashiki set-layout tatami
+# fi
+# Usage: yashiki bind alt-space exec ~/.config/yashiki/toggle-layout.sh
+
+# Tag bindings
 yashiki bind alt-1 view-tag 1
 yashiki bind alt-2 view-tag 2
+yashiki bind alt-3 view-tag 3
 yashiki bind alt-shift-1 move-to-tag 1
 yashiki bind alt-shift-2 move-to-tag 2
+yashiki bind alt-shift-3 move-to-tag 3
 yashiki bind alt-tab focus-window next
 yashiki bind alt-shift-tab focus-window prev
 yashiki bind alt-return retile
@@ -142,7 +168,7 @@ yashiki bind alt-l layout-cmd inc-main-ratio
 yashiki bind alt-o focus-output next
 yashiki bind alt-shift-o send-to-output next
 
-# Gap configuration
+# Gap configuration (sent to currently active layout engine)
 yashiki layout-cmd set-inner-gap 10
 yashiki layout-cmd set-outer-gap 10
 yashiki layout-cmd set-smart-gaps off
@@ -174,7 +200,9 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 - **core/tag.rs** - Tag bitmask
 - **ipc/server.rs** - IPC server on `/tmp/yashiki.sock`
 - **ipc/client.rs** - IPC client for CLI
-- **layout.rs** - `LayoutEngine` for spawning and communicating with tatami
+- **layout.rs** - `LayoutEngine` and `LayoutEngineManager`
+  - `LayoutEngine` spawns and communicates with a single layout engine process
+  - `LayoutEngineManager` manages multiple engines with lazy spawning
 - **app.rs** - Main event loop with CFRunLoop timer
   - Processes: IPC commands, hotkey commands, workspace events, observer events
   - Auto-retile on window add/remove
@@ -215,6 +243,10 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 ### Not Yet Implemented
 - `SwapWindow` command (swap positions with window in direction)
 - `CloseWindow` / `ToggleFloat`
+- Display specification interface (for per-display commands)
+  - Support flexible display identification: by ID, by name, by position
+  - Example: `yashiki --output "Built-in Display" set-layout tatami`
+  - Example: `yashiki --output 1 view-tag 1`
 
 ## Development Notes
 
@@ -291,16 +323,31 @@ Focus involves: `activate_application(pid)` then `AXUIElement.raise()`
 - Unlike Wayland compositors, macOS cannot prevent external focus changes
 - This ensures the focused window is always visible
 
+### Per-Tag Layout Switching
+- `State` holds `default_layout: String` and `tag_layouts: HashMap<u8, String>`
+- `Display` holds `current_layout: Option<String>` and `previous_layout: Option<String>`
+- Layout determination logic:
+  | Operation | Layout Behavior |
+  |-----------|-----------------|
+  | `view_tag(N)` | Switch to `tag_layouts[N]` or `default_layout` |
+  | `toggle_view_tag(N)` | **Maintain** current layout (no change) |
+  | `view_tag_last` | Swap `current_layout` ↔ `previous_layout` |
+  | `set-layout <layout>` | Set for current tag + immediate retile |
+  | `set-layout --tag N <layout>` | Set for tag N (applied when switching to that tag) |
+- `LayoutEngineManager` spawns engines lazily on first use and keeps them running
+- Each engine maintains its own state (main_ratio, gaps, etc.) independently
+- `layout-cmd` sends commands to the currently active layout engine
+
 ## Testing
 
-### Current Test Coverage (70 tests)
+### Current Test Coverage (74 tests)
 
 Run tests: `cargo test --all`
 
 **Tested modules:**
 - `core/tag.rs` - Tag bitmask operations (7 tests)
 - `macos/hotkey.rs` - `parse_hotkey()`, `format_hotkey()` (15 tests)
-- `yashiki-ipc` - Command/Response/LayoutMessage serialization (17 tests)
+- `yashiki-ipc` - Command/Response/LayoutMessage serialization (21 tests)
 - `core/state.rs` - State management with MockWindowSystem (13 tests)
 - `app.rs` - `process_command()` effect generation (9 tests)
 - `yashiki-layout-byobu` - Accordion layout and commands (9 tests)
@@ -368,14 +415,14 @@ fn process_command(
 fn execute_effects<M: WindowManipulator>(
     effects: Vec<Effect>,
     state: &RefCell<State>,
-    layout_engine: &RefCell<Option<LayoutEngine>>,
+    layout_engine_manager: &RefCell<LayoutEngineManager>,
     manipulator: &M,
 ) -> Result<(), String>
 
 // Orchestrator
 fn handle_ipc_command<M: WindowManipulator>(...) -> Response {
     let result = process_command(&mut state, &mut hotkey_manager, cmd);
-    execute_effects(result.effects, state, layout_engine, manipulator)?;
+    execute_effects(result.effects, state, layout_engine_manager, manipulator)?;
     result.response
 }
 ```

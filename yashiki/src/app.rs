@@ -2,7 +2,7 @@ use crate::core::{State, WindowMove};
 use crate::effect::{CommandResult, Effect};
 use crate::event::Event;
 use crate::ipc::IpcServer;
-use crate::layout::LayoutEngine;
+use crate::layout::LayoutEngineManager;
 use crate::macos;
 use crate::macos::{HotkeyManager, ObserverManager, WorkspaceEvent, WorkspaceWatcher};
 use crate::pid;
@@ -25,7 +25,7 @@ struct RunLoopContext {
     event_tx: mpsc::Sender<Event>,
     observer_manager: RefCell<ObserverManager>,
     state: RefCell<State>,
-    layout_engine: RefCell<Option<LayoutEngine>>,
+    layout_engine_manager: RefCell<LayoutEngineManager>,
     hotkey_manager: RefCell<HotkeyManager>,
     window_system: MacOSWindowSystem,
     window_manipulator: MacOSWindowManipulator,
@@ -141,21 +141,14 @@ impl App {
         state.sync_all(&window_system);
         let state = RefCell::new(state);
 
-        // Spawn layout engine
-        let layout_engine = match LayoutEngine::spawn("byobu") {
-            Ok(engine) => Some(engine),
-            Err(e) => {
-                tracing::warn!("Failed to spawn layout engine: {}", e);
-                None
-            }
-        };
-        let layout_engine = RefCell::new(layout_engine);
+        // Create layout engine manager (lazy spawning)
+        let layout_engine_manager = RefCell::new(LayoutEngineManager::new());
 
         // Create window manipulator
         let window_manipulator = MacOSWindowManipulator::default();
 
         // Initial retile
-        do_retile(&state, &layout_engine, &window_manipulator);
+        do_retile(&state, &layout_engine_manager, &window_manipulator);
 
         // Create hotkey manager
         let (hotkey_cmd_tx, hotkey_cmd_rx) = std_mpsc::channel::<Command>();
@@ -175,7 +168,7 @@ impl App {
             event_tx,
             observer_manager: RefCell::new(observer_manager),
             state,
-            layout_engine,
+            layout_engine_manager,
             hotkey_manager: RefCell::new(hotkey_manager),
             window_system,
             window_manipulator,
@@ -199,7 +192,7 @@ impl App {
                 tracing::debug!("Received IPC command: {:?}", cmd);
                 let response = handle_ipc_command(
                     &ctx.state,
-                    &ctx.layout_engine,
+                    &ctx.layout_engine_manager,
                     &ctx.hotkey_manager,
                     &ctx.window_manipulator,
                     &cmd,
@@ -217,7 +210,7 @@ impl App {
                 tracing::debug!("Received hotkey command: {:?}", cmd);
                 let _ = handle_ipc_command(
                     &ctx.state,
-                    &ctx.layout_engine,
+                    &ctx.layout_engine_manager,
                     &ctx.hotkey_manager,
                     &ctx.window_manipulator,
                     &cmd,
@@ -238,7 +231,11 @@ impl App {
                         ctx.observer_manager.borrow_mut().remove_observer(pid);
                         // Remove windows belonging to this PID from state
                         if ctx.state.borrow_mut().sync_pid(&ctx.window_system, pid) {
-                            do_retile(&ctx.state, &ctx.layout_engine, &ctx.window_manipulator);
+                            do_retile(
+                                &ctx.state,
+                                &ctx.layout_engine_manager,
+                                &ctx.window_manipulator,
+                            );
                         }
                     }
                 }
@@ -263,14 +260,11 @@ impl App {
                 // On external focus change, notify layout engine and switch tag if focused window is hidden
                 if is_focus_event {
                     if let Some(focused_id) = ctx.state.borrow().focused {
-                        if notify_layout_focus(&ctx.layout_engine, focused_id) {
+                        if notify_layout_focus(&ctx.state, &ctx.layout_engine_manager, focused_id) {
                             needs_retile = true;
                         }
                     }
-                    let moves = {
-                        let mut engine = ctx.layout_engine.borrow_mut();
-                        switch_tag_for_focused_window(&ctx.state, &mut *engine)
-                    };
+                    let moves = switch_tag_for_focused_window(&ctx.state);
                     if let Some(moves) = moves {
                         ctx.window_manipulator.apply_window_moves(&moves);
                         needs_retile = true;
@@ -282,7 +276,11 @@ impl App {
                 }
             }
             if needs_retile {
-                do_retile(&ctx.state, &ctx.layout_engine, &ctx.window_manipulator);
+                do_retile(
+                    &ctx.state,
+                    &ctx.layout_engine_manager,
+                    &ctx.window_manipulator,
+                );
             }
         }
 
@@ -381,6 +379,11 @@ fn process_command(
                 visible_tags: state.visible_tags().mask(),
                 focused_window_id: state.focused,
                 window_count: state.windows.len(),
+                default_layout: state.default_layout.clone(),
+                current_layout: state
+                    .displays
+                    .get(&state.focused_display)
+                    .and_then(|d| d.current_layout.clone()),
             },
         }),
         Command::FocusedWindow => {
@@ -492,6 +495,25 @@ fn process_command(
             }
         }
 
+        // Layout configuration
+        Command::SetDefaultLayout { layout } => {
+            state.set_default_layout(layout.clone());
+            CommandResult::ok()
+        }
+        Command::SetLayout { tag, layout } => {
+            state.set_layout(*tag, layout.clone());
+            // Only retile if setting for current tag (no tag specified)
+            if tag.is_none() {
+                CommandResult::ok_with_effects(vec![Effect::Retile])
+            } else {
+                CommandResult::ok()
+            }
+        }
+        Command::GetLayout { tag } => {
+            let layout = state.get_layout(*tag).to_string();
+            CommandResult::with_response(Response::Layout { layout })
+        }
+
         // Layout commands - need layout engine interaction (handled as effects)
         Command::LayoutCommand { cmd, args } => CommandResult::ok_with_effects(vec![
             Effect::SendLayoutCommand {
@@ -579,7 +601,7 @@ fn process_command(
 fn execute_effects<M: WindowManipulator>(
     effects: Vec<Effect>,
     state: &RefCell<State>,
-    layout_engine: &RefCell<Option<LayoutEngine>>,
+    layout_engine_manager: &RefCell<LayoutEngineManager>,
     manipulator: &M,
 ) -> Result<(), String> {
     for effect in effects {
@@ -589,8 +611,8 @@ fn execute_effects<M: WindowManipulator>(
             }
             Effect::FocusWindow { window_id, pid } => {
                 manipulator.focus_window(window_id, pid);
-                if notify_layout_focus(layout_engine, window_id) {
-                    do_retile(state, layout_engine, manipulator);
+                if notify_layout_focus(state, layout_engine_manager, window_id) {
+                    do_retile(state, layout_engine_manager, manipulator);
                 }
             }
             Effect::MoveWindowToPosition {
@@ -602,21 +624,18 @@ fn execute_effects<M: WindowManipulator>(
                 manipulator.move_window_to_position(window_id, pid, x, y);
             }
             Effect::Retile => {
-                do_retile(state, layout_engine, manipulator);
+                do_retile(state, layout_engine_manager, manipulator);
             }
             Effect::RetileDisplays(display_ids) => {
                 for display_id in display_ids {
-                    do_retile_display(state, layout_engine, manipulator, display_id);
+                    do_retile_display(state, layout_engine_manager, manipulator, display_id);
                 }
             }
             Effect::SendLayoutCommand { cmd, args } => {
-                let mut engine = layout_engine.borrow_mut();
-                if let Some(ref mut engine) = *engine {
-                    if let Err(e) = engine.send_command(&cmd, &args) {
-                        return Err(format!("Layout command failed: {}", e));
-                    }
-                } else {
-                    return Err("No layout engine available".to_string());
+                let layout_name = state.borrow().current_layout().to_string();
+                let mut manager = layout_engine_manager.borrow_mut();
+                if let Err(e) = manager.send_command(&layout_name, &cmd, &args) {
+                    return Err(format!("Layout command failed: {}", e));
                 }
             }
             Effect::ExecCommand(command) => {
@@ -634,7 +653,7 @@ fn execute_effects<M: WindowManipulator>(
 /// This function orchestrates process_command and execute_effects.
 fn handle_ipc_command<M: WindowManipulator>(
     state: &RefCell<State>,
-    layout_engine: &RefCell<Option<LayoutEngine>>,
+    layout_engine_manager: &RefCell<LayoutEngineManager>,
     hotkey_manager: &RefCell<HotkeyManager>,
     manipulator: &M,
     cmd: &Command,
@@ -645,7 +664,7 @@ fn handle_ipc_command<M: WindowManipulator>(
         cmd,
     );
 
-    if let Err(e) = execute_effects(result.effects, state, layout_engine, manipulator) {
+    if let Err(e) = execute_effects(result.effects, state, layout_engine_manager, manipulator) {
         return Response::Error { message: e };
     }
 
@@ -654,46 +673,37 @@ fn handle_ipc_command<M: WindowManipulator>(
 
 fn do_retile<M: WindowManipulator>(
     state: &RefCell<State>,
-    layout_engine: &RefCell<Option<LayoutEngine>>,
+    layout_engine_manager: &RefCell<LayoutEngineManager>,
     manipulator: &M,
 ) {
-    let mut engine = layout_engine.borrow_mut();
-    let Some(ref mut engine) = *engine else {
-        return;
-    };
-
     // Collect display IDs first to avoid borrow issues
     let display_ids: Vec<_> = state.borrow().displays.keys().copied().collect();
 
     for display_id in display_ids {
-        retile_single_display(state, engine, manipulator, display_id);
+        retile_single_display(state, layout_engine_manager, manipulator, display_id);
     }
 }
 
 fn do_retile_display<M: WindowManipulator>(
     state: &RefCell<State>,
-    layout_engine: &RefCell<Option<LayoutEngine>>,
+    layout_engine_manager: &RefCell<LayoutEngineManager>,
     manipulator: &M,
     display_id: crate::macos::DisplayId,
 ) {
-    let mut engine = layout_engine.borrow_mut();
-    let Some(ref mut engine) = *engine else {
-        return;
-    };
     if !state.borrow().displays.contains_key(&display_id) {
         return;
     }
-    retile_single_display(state, engine, manipulator, display_id);
+    retile_single_display(state, layout_engine_manager, manipulator, display_id);
 }
 
 fn retile_single_display<M: WindowManipulator>(
     state: &RefCell<State>,
-    engine: &mut LayoutEngine,
+    layout_engine_manager: &RefCell<LayoutEngineManager>,
     manipulator: &M,
     display_id: crate::macos::DisplayId,
 ) {
     // Get layout parameters with immutable borrow
-    let (window_ids, width, height, display_frame) = {
+    let (window_ids, width, height, display_frame, layout_name) = {
         let state = state.borrow();
         let Some(display) = state.displays.get(&display_id) else {
             return;
@@ -703,15 +713,18 @@ fn retile_single_display<M: WindowManipulator>(
             return;
         }
         let window_ids: Vec<u32> = visible_windows.iter().map(|w| w.id).collect();
+        let layout_name = state.current_layout_for_display(display_id).to_string();
         (
             window_ids,
             display.frame.width,
             display.frame.height,
             display.frame,
+            layout_name,
         )
     };
 
-    match engine.request_layout(width, height, &window_ids) {
+    let mut manager = layout_engine_manager.borrow_mut();
+    match manager.request_layout(&layout_name, width, height, &window_ids) {
         Ok(geometries) => {
             // Update window_order based on geometries order from layout engine
             {
@@ -756,10 +769,7 @@ fn focus_visible_window_if_needed<M: WindowManipulator>(state: &RefCell<State>, 
     }
 }
 
-fn switch_tag_for_focused_window(
-    state: &RefCell<State>,
-    _layout_engine: &mut Option<LayoutEngine>,
-) -> Option<Vec<WindowMove>> {
+fn switch_tag_for_focused_window(state: &RefCell<State>) -> Option<Vec<WindowMove>> {
     let (focused_id, window_tags, window_display_id, is_hidden) = {
         let s = state.borrow();
         let focused_id = s.focused?;
@@ -801,17 +811,20 @@ fn switch_tag_for_focused_window(
 
 /// Notify layout engine of focus change.
 /// Returns true if the layout engine requests a retile.
-fn notify_layout_focus(layout_engine: &RefCell<Option<LayoutEngine>>, window_id: u32) -> bool {
-    let mut engine = layout_engine.borrow_mut();
-    if let Some(ref mut engine) = *engine {
-        match engine.send_command("focus-changed", &[window_id.to_string()]) {
-            Ok(needs_retile) => return needs_retile,
-            Err(e) => {
-                tracing::warn!("Failed to notify layout engine of focus change: {}", e);
-            }
+fn notify_layout_focus(
+    state: &RefCell<State>,
+    layout_engine_manager: &RefCell<LayoutEngineManager>,
+    window_id: u32,
+) -> bool {
+    let layout_name = state.borrow().current_layout().to_string();
+    let mut manager = layout_engine_manager.borrow_mut();
+    match manager.send_command(&layout_name, "focus-changed", &[window_id.to_string()]) {
+        Ok(needs_retile) => needs_retile,
+        Err(e) => {
+            tracing::warn!("Failed to notify layout engine of focus change: {}", e);
+            false
         }
     }
-    false
 }
 
 #[cfg(test)]

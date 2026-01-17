@@ -21,6 +21,9 @@ pub enum Command {
     SendToOutput { direction: OutputDirection },
 
     // Layout operations
+    SetDefaultLayout { layout: String },
+    SetLayout { tag: Option<u32>, layout: String },
+    GetLayout { tag: Option<u32> },
     LayoutCommand { cmd: String, args: Vec<String> },
     Retile,
 
@@ -69,6 +72,7 @@ pub enum Response {
     State { state: StateInfo },
     Bindings { bindings: Vec<BindingInfo> },
     WindowId { id: Option<u32> },
+    Layout { layout: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +100,8 @@ pub struct StateInfo {
     pub visible_tags: u32,
     pub focused_window_id: Option<u32>,
     pub window_count: usize,
+    pub default_layout: String,
+    pub current_layout: Option<String>,
 }
 
 #[cfg(test)]
@@ -255,6 +261,8 @@ mod tests {
                 visible_tags: 0b0011,
                 focused_window_id: Some(42),
                 window_count: 5,
+                default_layout: "tatami".to_string(),
+                current_layout: Some("byobu".to_string()),
             },
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -265,7 +273,104 @@ mod tests {
                 assert_eq!(state.visible_tags, 0b0011);
                 assert_eq!(state.focused_window_id, Some(42));
                 assert_eq!(state.window_count, 5);
+                assert_eq!(state.default_layout, "tatami");
+                assert_eq!(state.current_layout, Some("byobu".to_string()));
             }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_command_set_default_layout_serialization() {
+        let cmd = Command::SetDefaultLayout {
+            layout: "tatami".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"set_default_layout\""));
+        assert!(json.contains("\"layout\":\"tatami\""));
+
+        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Command::SetDefaultLayout { layout } => assert_eq!(layout, "tatami"),
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_command_set_layout_serialization() {
+        // Without tag (current tag)
+        let cmd = Command::SetLayout {
+            tag: None,
+            layout: "byobu".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"set_layout\""));
+        assert!(json.contains("\"layout\":\"byobu\""));
+
+        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Command::SetLayout { tag, layout } => {
+                assert_eq!(tag, None);
+                assert_eq!(layout, "byobu");
+            }
+            _ => panic!("Wrong variant"),
+        }
+
+        // With tag
+        let cmd = Command::SetLayout {
+            tag: Some(3),
+            layout: "tatami".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"tag\":3"));
+
+        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Command::SetLayout { tag, layout } => {
+                assert_eq!(tag, Some(3));
+                assert_eq!(layout, "tatami");
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_command_get_layout_serialization() {
+        // Without tag (current layout)
+        let cmd = Command::GetLayout { tag: None };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"get_layout\""));
+
+        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Command::GetLayout { tag } => assert_eq!(tag, None),
+            _ => panic!("Wrong variant"),
+        }
+
+        // With tag
+        let cmd = Command::GetLayout { tag: Some(2) };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"tag\":2"));
+
+        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Command::GetLayout { tag } => assert_eq!(tag, Some(2)),
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_response_layout_serialization() {
+        let resp = Response::Layout {
+            layout: "tatami".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"type\":\"layout\""));
+        assert!(json.contains("\"layout\":\"tatami\""));
+
+        let deserialized: Response = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Response::Layout { layout } => assert_eq!(layout, "tatami"),
             _ => panic!("Wrong variant"),
         }
     }

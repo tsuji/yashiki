@@ -21,6 +21,8 @@ pub struct State {
     pub focused: Option<WindowId>,
     pub focused_display: DisplayId,
     default_tag: Tag,
+    pub default_layout: String,
+    pub tag_layouts: HashMap<u8, String>,
 }
 
 impl State {
@@ -31,7 +33,66 @@ impl State {
             focused: None,
             focused_display: 0,
             default_tag: Tag::new(1),
+            default_layout: "tatami".to_string(),
+            tag_layouts: HashMap::new(),
         }
+    }
+
+    pub fn set_default_layout(&mut self, layout: String) {
+        tracing::info!("Set default layout: {}", layout);
+        self.default_layout = layout;
+    }
+
+    pub fn set_layout(&mut self, tag: Option<u32>, layout: String) {
+        match tag {
+            Some(tag) => {
+                // Set layout for specific tag
+                tracing::info!("Set layout for tag {}: {}", tag, layout);
+                self.tag_layouts.insert(tag as u8, layout);
+            }
+            None => {
+                // Set layout for current tag on focused display
+                let Some(disp) = self.displays.get(&self.focused_display) else {
+                    return;
+                };
+                if let Some(current_tag) = disp.visible_tags.first_tag() {
+                    tracing::info!("Set layout for current tag {}: {}", current_tag, layout);
+                    self.tag_layouts.insert(current_tag as u8, layout.clone());
+                }
+                // Also update the display's current layout
+                let disp = self.displays.get_mut(&self.focused_display).unwrap();
+                disp.previous_layout = disp.current_layout.take();
+                disp.current_layout = Some(layout);
+            }
+        }
+    }
+
+    pub fn get_layout(&self, tag: Option<u32>) -> &str {
+        match tag {
+            Some(tag) => self.resolve_layout_for_tag(tag as u8),
+            None => self.current_layout(),
+        }
+    }
+
+    pub fn resolve_layout_for_tag(&self, tag: u8) -> &str {
+        self.tag_layouts
+            .get(&tag)
+            .map(|s| s.as_str())
+            .unwrap_or(&self.default_layout)
+    }
+
+    pub fn current_layout(&self) -> &str {
+        self.displays
+            .get(&self.focused_display)
+            .and_then(|d| d.current_layout.as_deref())
+            .unwrap_or(&self.default_layout)
+    }
+
+    pub fn current_layout_for_display(&self, display_id: DisplayId) -> &str {
+        self.displays
+            .get(&display_id)
+            .and_then(|d| d.current_layout.as_deref())
+            .unwrap_or(&self.default_layout)
     }
 
     pub fn visible_tags(&self) -> Tag {
@@ -314,6 +375,7 @@ impl State {
     // Tag operations - now operate on focused_display
 
     pub fn view_tag(&mut self, tag: u32) -> Vec<WindowMove> {
+        let new_layout = self.resolve_layout_for_tag(tag as u8).to_string();
         let Some(disp) = self.displays.get_mut(&self.focused_display) else {
             return vec![];
         };
@@ -322,13 +384,17 @@ impl State {
             return vec![];
         }
         tracing::info!(
-            "View tag on display {}: {} -> {}",
+            "View tag on display {}: {} -> {}, layout: {:?} -> {}",
             self.focused_display,
             disp.visible_tags.mask(),
-            new_visible.mask()
+            new_visible.mask(),
+            disp.current_layout,
+            new_layout
         );
         disp.previous_visible_tags = disp.visible_tags;
         disp.visible_tags = new_visible;
+        disp.previous_layout = disp.current_layout.take();
+        disp.current_layout = Some(new_layout);
         self.compute_layout_changes_for_display(self.focused_display)
     }
 
@@ -360,12 +426,15 @@ impl State {
             return vec![];
         }
         tracing::info!(
-            "View tag last on display {}: {} -> {}",
+            "View tag last on display {}: {} -> {}, layout: {:?} -> {:?}",
             self.focused_display,
             disp.visible_tags.mask(),
-            disp.previous_visible_tags.mask()
+            disp.previous_visible_tags.mask(),
+            disp.current_layout,
+            disp.previous_layout
         );
         std::mem::swap(&mut disp.visible_tags, &mut disp.previous_visible_tags);
+        std::mem::swap(&mut disp.current_layout, &mut disp.previous_layout);
         self.compute_layout_changes_for_display(self.focused_display)
     }
 

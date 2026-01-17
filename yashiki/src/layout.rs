@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use yashiki_ipc::layout::{LayoutMessage, LayoutResult, WindowGeometry};
@@ -91,5 +92,47 @@ impl LayoutEngine {
             .with_context(|| format!("Failed to parse layout response: {}", line.trim()))?;
 
         Ok(result)
+    }
+}
+
+pub struct LayoutEngineManager {
+    engines: HashMap<String, LayoutEngine>,
+}
+
+impl LayoutEngineManager {
+    pub fn new() -> Self {
+        Self {
+            engines: HashMap::new(),
+        }
+    }
+
+    pub fn get_or_spawn(&mut self, name: &str) -> Result<&mut LayoutEngine> {
+        if !self.engines.contains_key(name) {
+            let engine = LayoutEngine::spawn(name)?;
+            self.engines.insert(name.to_string(), engine);
+        }
+        Ok(self.engines.get_mut(name).unwrap())
+    }
+
+    pub fn request_layout(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        window_ids: &[u32],
+    ) -> Result<Vec<WindowGeometry>> {
+        let engine = self.get_or_spawn(name)?;
+        engine.request_layout(width, height, window_ids)
+    }
+
+    pub fn send_command(&mut self, name: &str, cmd: &str, args: &[String]) -> Result<bool> {
+        let engine = self.get_or_spawn(name)?;
+        engine.send_command(cmd, args)
+    }
+}
+
+impl Default for LayoutEngineManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
