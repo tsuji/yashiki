@@ -45,17 +45,18 @@ impl State {
 
     pub fn set_layout_on_display(
         &mut self,
-        tag: Option<u32>,
+        tags: Option<u32>,
         display_id: Option<DisplayId>,
         layout: String,
     ) {
         let target_display = display_id.unwrap_or(self.focused_display);
 
-        match tag {
-            Some(tag) => {
-                // Set layout for specific tag
-                tracing::info!("Set layout for tag {}: {}", tag, layout);
-                self.tag_layouts.insert(tag as u8, layout);
+        match tags {
+            Some(tags) => {
+                // Set layout for specific tag (use first tag from mask)
+                let first_tag = Tag::from_mask(tags).first_tag().unwrap_or(1);
+                tracing::info!("Set layout for tag {}: {}", first_tag, layout);
+                self.tag_layouts.insert(first_tag as u8, layout);
             }
             None => {
                 // Set layout for current tag on target display
@@ -79,11 +80,14 @@ impl State {
         }
     }
 
-    pub fn get_layout_on_display(&self, tag: Option<u32>, display_id: Option<DisplayId>) -> &str {
+    pub fn get_layout_on_display(&self, tags: Option<u32>, display_id: Option<DisplayId>) -> &str {
         let target_display = display_id.unwrap_or(self.focused_display);
 
-        match tag {
-            Some(tag) => self.resolve_layout_for_tag(tag as u8),
+        match tags {
+            Some(tags) => {
+                let first_tag = Tag::from_mask(tags).first_tag().unwrap_or(1);
+                self.resolve_layout_for_tag(first_tag as u8)
+            }
             None => self.current_layout_for_display(target_display),
         }
     }
@@ -506,21 +510,22 @@ impl State {
 
     // Tag operations - now operate on focused_display or specified display
 
-    pub fn view_tag(&mut self, tag: u32) -> Vec<WindowMove> {
-        self.view_tag_on_display(tag, self.focused_display)
+    pub fn view_tags(&mut self, tags: u32) -> Vec<WindowMove> {
+        self.view_tags_on_display(tags, self.focused_display)
     }
 
-    pub fn view_tag_on_display(&mut self, tag: u32, display_id: DisplayId) -> Vec<WindowMove> {
-        let new_layout = self.resolve_layout_for_tag(tag as u8).to_string();
+    pub fn view_tags_on_display(&mut self, tags: u32, display_id: DisplayId) -> Vec<WindowMove> {
+        let new_visible = Tag::from_mask(tags);
+        let first_tag = new_visible.first_tag().unwrap_or(1);
+        let new_layout = self.resolve_layout_for_tag(first_tag as u8).to_string();
         let Some(disp) = self.displays.get_mut(&display_id) else {
             return vec![];
         };
-        let new_visible = Tag::new(tag);
         if disp.visible_tags == new_visible {
             return vec![];
         }
         tracing::info!(
-            "View tag on display {}: {} -> {}, layout: {:?} -> {}",
+            "View tags on display {}: {} -> {}, layout: {:?} -> {}",
             display_id,
             disp.visible_tags.mask(),
             new_visible.mask(),
@@ -534,21 +539,17 @@ impl State {
         self.compute_layout_changes_for_display(display_id)
     }
 
-    pub fn toggle_view_tag_on_display(
-        &mut self,
-        tag: u32,
-        display_id: DisplayId,
-    ) -> Vec<WindowMove> {
+    pub fn toggle_tags_on_display(&mut self, tags: u32, display_id: DisplayId) -> Vec<WindowMove> {
         let Some(disp) = self.displays.get_mut(&display_id) else {
             return vec![];
         };
-        let tag = Tag::new(tag);
+        let tag = Tag::from_mask(tags);
         let new_visible = disp.visible_tags.toggle(tag);
         if new_visible.mask() == 0 {
             return vec![];
         }
         tracing::info!(
-            "Toggle view tag on display {}: {} -> {}",
+            "Toggle tags on display {}: {} -> {}",
             display_id,
             disp.visible_tags.mask(),
             new_visible.mask()
@@ -558,7 +559,7 @@ impl State {
         self.compute_layout_changes_for_display(display_id)
     }
 
-    pub fn view_tag_last(&mut self) -> Vec<WindowMove> {
+    pub fn view_tags_last(&mut self) -> Vec<WindowMove> {
         let Some(disp) = self.displays.get_mut(&self.focused_display) else {
             return vec![];
         };
@@ -566,7 +567,7 @@ impl State {
             return vec![];
         }
         tracing::info!(
-            "View tag last on display {}: {} -> {}, layout: {:?} -> {:?}",
+            "View tags last on display {}: {} -> {}, layout: {:?} -> {:?}",
             self.focused_display,
             disp.visible_tags.mask(),
             disp.previous_visible_tags.mask(),
@@ -578,14 +579,14 @@ impl State {
         self.compute_layout_changes_for_display(self.focused_display)
     }
 
-    pub fn move_focused_to_tag(&mut self, tag: u32) -> Vec<WindowMove> {
+    pub fn move_focused_to_tags(&mut self, tags: u32) -> Vec<WindowMove> {
         let Some(focused_id) = self.focused else {
             return vec![];
         };
-        let new_tag = Tag::new(tag);
+        let new_tags = Tag::from_mask(tags);
         let display_id = if let Some(window) = self.windows.get_mut(&focused_id) {
-            tracing::info!("Move window {} to tag {}", window.id, new_tag.mask());
-            window.tags = new_tag;
+            tracing::info!("Move window {} to tags {}", window.id, new_tags.mask());
+            window.tags = new_tags;
             window.display_id
         } else {
             return vec![];
@@ -593,18 +594,18 @@ impl State {
         self.compute_layout_changes_for_display(display_id)
     }
 
-    pub fn toggle_focused_window_tag(&mut self, tag: u32) -> Vec<WindowMove> {
+    pub fn toggle_focused_window_tags(&mut self, tags: u32) -> Vec<WindowMove> {
         let Some(focused_id) = self.focused else {
             return vec![];
         };
-        let tag = Tag::new(tag);
+        let tag = Tag::from_mask(tags);
         let display_id = if let Some(window) = self.windows.get_mut(&focused_id) {
             let new_tags = window.tags.toggle(tag);
             if new_tags.mask() == 0 {
                 return vec![];
             }
             tracing::info!(
-                "Toggle window {} tag: {} -> {}",
+                "Toggle window {} tags: {} -> {}",
                 window.id,
                 window.tags.mask(),
                 new_tags.mask()
@@ -957,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn test_view_tag_switches_tags() {
+    fn test_view_tags_switches_tags() {
         let ws = setup_mock_system();
         let mut state = State::new();
         state.sync_all(&ws);
@@ -965,8 +966,8 @@ mod tests {
         // Initial visible tag is 1
         assert_eq!(state.visible_tags().mask(), 0b1);
 
-        // Switch to tag 2
-        let moves = state.view_tag(2);
+        // Switch to tag 2 (bitmask 0b10)
+        let moves = state.view_tags(0b10);
         assert_eq!(state.visible_tags().mask(), 0b10);
 
         // All windows should be hidden (moved off-screen)
@@ -974,55 +975,55 @@ mod tests {
     }
 
     #[test]
-    fn test_view_tag_last_toggles_back() {
+    fn test_view_tags_last_toggles_back() {
         let ws = setup_mock_system();
         let mut state = State::new();
         state.sync_all(&ws);
 
-        state.view_tag(2);
+        state.view_tags(0b10);
         assert_eq!(state.visible_tags().mask(), 0b10);
 
-        state.view_tag_last();
+        state.view_tags_last();
         assert_eq!(state.visible_tags().mask(), 0b1);
     }
 
     #[test]
-    fn test_toggle_view_tag() {
+    fn test_toggle_tags() {
         let ws = setup_mock_system();
         let mut state = State::new();
         state.sync_all(&ws);
         let display_id = state.focused_display;
 
         // Toggle tag 2 on (so visible = tag 1 | tag 2)
-        state.toggle_view_tag_on_display(2, display_id);
+        state.toggle_tags_on_display(0b10, display_id);
         assert_eq!(state.visible_tags().mask(), 0b11);
 
         // Toggle tag 1 off (so visible = tag 2 only)
-        state.toggle_view_tag_on_display(1, display_id);
+        state.toggle_tags_on_display(0b01, display_id);
         assert_eq!(state.visible_tags().mask(), 0b10);
     }
 
     #[test]
-    fn test_toggle_view_tag_prevents_empty() {
+    fn test_toggle_tags_prevents_empty() {
         let ws = setup_mock_system();
         let mut state = State::new();
         state.sync_all(&ws);
         let display_id = state.focused_display;
 
         // Try to toggle off the only visible tag - should do nothing
-        let moves = state.toggle_view_tag_on_display(1, display_id);
+        let moves = state.toggle_tags_on_display(0b01, display_id);
         assert_eq!(state.visible_tags().mask(), 0b1);
         assert!(moves.is_empty());
     }
 
     #[test]
-    fn test_move_focused_to_tag() {
+    fn test_move_focused_to_tags() {
         let ws = setup_mock_system();
         let mut state = State::new();
         state.sync_all(&ws);
 
-        // Move focused window (100) to tag 2
-        let moves = state.move_focused_to_tag(2);
+        // Move focused window (100) to tag 2 (bitmask 0b10)
+        let moves = state.move_focused_to_tags(0b10);
 
         // Window 100 should now have tag 2
         assert_eq!(state.windows.get(&100).unwrap().tags.mask(), 0b10);
@@ -1157,8 +1158,8 @@ mod tests {
         let visible = state.visible_windows_on_display(1);
         assert_eq!(visible.len(), 3);
 
-        // Move one window to tag 2
-        state.move_focused_to_tag(2);
+        // Move one window to tag 2 (bitmask 0b10)
+        state.move_focused_to_tags(0b10);
 
         let visible = state.visible_windows_on_display(1);
         assert_eq!(visible.len(), 2);

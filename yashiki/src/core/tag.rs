@@ -7,6 +7,10 @@ impl Tag {
         Self(1 << (n - 1))
     }
 
+    pub fn from_mask(mask: u32) -> Self {
+        Self(mask)
+    }
+
     pub fn mask(self) -> u32 {
         self.0
     }
@@ -98,5 +102,17 @@ mod tests {
     fn test_equality() {
         assert_eq!(Tag::new(1), Tag::new(1));
         assert_ne!(Tag::new(1), Tag::new(2));
+    }
+
+    #[test]
+    fn test_from_mask() {
+        assert_eq!(Tag::from_mask(0b0001).mask(), 0b0001);
+        assert_eq!(Tag::from_mask(0b0010).mask(), 0b0010);
+        assert_eq!(Tag::from_mask(0b0011).mask(), 0b0011);
+        // from_mask with single tag should equal Tag::new
+        assert_eq!(Tag::from_mask(0b0001), Tag::new(1));
+        assert_eq!(Tag::from_mask(0b0010), Tag::new(2));
+        // from_mask with multiple tags
+        assert_eq!(Tag::from_mask(0b0011), Tag::new(1).toggle(Tag::new(2)));
     }
 }

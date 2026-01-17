@@ -451,48 +451,48 @@ fn process_command(
         }
 
         // Tag operations - mutate state, return effects
-        Command::ViewTag { tag, output } => {
+        Command::TagView { tags, output } => {
             let display_id = match state.get_target_display(output.as_ref()) {
                 Ok(id) => id,
                 Err(e) => return CommandResult::error(e),
             };
-            let moves = state.view_tag_on_display(*tag, display_id);
+            let moves = state.view_tags_on_display(*tags, display_id);
             CommandResult::ok_with_effects(vec![
                 Effect::ApplyWindowMoves(moves),
                 Effect::RetileDisplays(vec![display_id]),
                 Effect::FocusVisibleWindowIfNeeded,
             ])
         }
-        Command::ToggleViewTag { tag, output } => {
+        Command::TagToggle { tags, output } => {
             let display_id = match state.get_target_display(output.as_ref()) {
                 Ok(id) => id,
                 Err(e) => return CommandResult::error(e),
             };
-            let moves = state.toggle_view_tag_on_display(*tag, display_id);
+            let moves = state.toggle_tags_on_display(*tags, display_id);
             CommandResult::ok_with_effects(vec![
                 Effect::ApplyWindowMoves(moves),
                 Effect::RetileDisplays(vec![display_id]),
                 Effect::FocusVisibleWindowIfNeeded,
             ])
         }
-        Command::ViewTagLast => {
-            let moves = state.view_tag_last();
+        Command::TagViewLast => {
+            let moves = state.view_tags_last();
             CommandResult::ok_with_effects(vec![
                 Effect::ApplyWindowMoves(moves),
                 Effect::Retile,
                 Effect::FocusVisibleWindowIfNeeded,
             ])
         }
-        Command::MoveToTag { tag } => {
-            let moves = state.move_focused_to_tag(*tag);
+        Command::WindowMoveToTag { tags } => {
+            let moves = state.move_focused_to_tags(*tags);
             CommandResult::ok_with_effects(vec![
                 Effect::ApplyWindowMoves(moves),
                 Effect::Retile,
                 Effect::FocusVisibleWindowIfNeeded,
             ])
         }
-        Command::ToggleWindowTag { tag } => {
-            let moves = state.toggle_focused_window_tag(*tag);
+        Command::WindowToggleTag { tags } => {
+            let moves = state.toggle_focused_window_tags(*tags);
             CommandResult::ok_with_effects(vec![
                 Effect::ApplyWindowMoves(moves),
                 Effect::Retile,
@@ -511,7 +511,7 @@ fn process_command(
         },
 
         // Focus operations
-        Command::FocusWindow { direction } => {
+        Command::WindowFocus { direction } => {
             if let Some((window_id, pid)) = state.focus_window(*direction) {
                 tracing::info!("Focusing window {} (pid {})", window_id, pid);
                 CommandResult::ok_with_effects(vec![Effect::FocusWindow { window_id, pid }])
@@ -519,7 +519,7 @@ fn process_command(
                 CommandResult::ok()
             }
         }
-        Command::FocusOutput { direction } => {
+        Command::OutputFocus { direction } => {
             let result = state.focus_output(*direction);
             if let Some((window_id, pid)) = result {
                 tracing::info!("Focusing output - window {} (pid {})", window_id, pid);
@@ -530,7 +530,7 @@ fn process_command(
         }
 
         // Send to output - returns displays that need retiling
-        Command::SendToOutput { direction } => {
+        Command::OutputSend { direction } => {
             let displays_to_retile = state.send_to_output(*direction);
             if let Some((source_display, target_display)) = displays_to_retile {
                 // Get the window info for moving
@@ -553,12 +553,12 @@ fn process_command(
         }
 
         // Layout configuration
-        Command::SetDefaultLayout { layout } => {
+        Command::LayoutSetDefault { layout } => {
             state.set_default_layout(layout.clone());
             CommandResult::ok()
         }
-        Command::SetLayout {
-            tag,
+        Command::LayoutSet {
+            tags,
             output,
             layout,
         } => {
@@ -566,9 +566,9 @@ fn process_command(
                 Ok(id) => Some(id),
                 Err(e) => return CommandResult::error(e),
             };
-            state.set_layout_on_display(*tag, display_id, layout.clone());
-            // Only retile if setting for current tag (no tag specified)
-            if tag.is_none() {
+            state.set_layout_on_display(*tags, display_id, layout.clone());
+            // Only retile if setting for current tag (no tags specified)
+            if tags.is_none() {
                 if let Some(id) = display_id {
                     CommandResult::ok_with_effects(vec![Effect::RetileDisplays(vec![id])])
                 } else {
@@ -578,12 +578,12 @@ fn process_command(
                 CommandResult::ok()
             }
         }
-        Command::GetLayout { tag, output } => {
+        Command::LayoutGet { tags, output } => {
             let display_id = match state.get_target_display(output.as_ref()) {
                 Ok(id) => Some(id),
                 Err(e) => return CommandResult::error(e),
             };
-            let layout = state.get_layout_on_display(*tag, display_id).to_string();
+            let layout = state.get_layout_on_display(*tags, display_id).to_string();
             CommandResult::with_response(Response::Layout { layout })
         }
 
@@ -647,7 +647,7 @@ fn process_command(
                             window_id,
                             pid
                         );
-                        let moves = state.view_tag(tag);
+                        let moves = state.view_tags(1 << (tag - 1));
                         CommandResult::ok_with_effects(vec![
                             Effect::ApplyWindowMoves(moves),
                             Effect::Retile,
@@ -887,7 +887,7 @@ fn switch_tag_for_focused_window(state: &RefCell<State>) -> Option<Vec<WindowMov
         focused_id
     );
 
-    let moves = state.borrow_mut().view_tag(tag);
+    let moves = state.borrow_mut().view_tags(1 << (tag - 1));
     // Note: Retiling is handled by the caller after applying moves
     Some(moves)
 }
@@ -962,14 +962,14 @@ mod tests {
     }
 
     #[test]
-    fn test_view_tag_produces_correct_effects() {
+    fn test_tag_view_produces_correct_effects() {
         let (mut state, mut hotkey_manager) = setup_state();
 
         let result = process_command(
             &mut state,
             &mut hotkey_manager,
-            &Command::ViewTag {
-                tag: 2,
+            &Command::TagView {
+                tags: 0b10,
                 output: None,
             },
         );
@@ -987,13 +987,13 @@ mod tests {
     }
 
     #[test]
-    fn test_focus_window_produces_focus_effect() {
+    fn test_window_focus_produces_focus_effect() {
         let (mut state, mut hotkey_manager) = setup_state();
 
         let result = process_command(
             &mut state,
             &mut hotkey_manager,
-            &Command::FocusWindow {
+            &Command::WindowFocus {
                 direction: Direction::Next,
             },
         );

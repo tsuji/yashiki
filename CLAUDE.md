@@ -61,8 +61,8 @@ Like AeroSpace, uses virtual workspaces instead of macOS native Spaces:
 - **Per-tag layout switching**
   - Each tag can have a different layout engine (tatami, byobu, etc.)
   - Layout engines are spawned lazily (on first use)
-  - `toggle_view_tag` maintains current layout, `view_tag` switches to tag's layout
-  - `view_tag_last` restores previous layout along with previous tags
+  - `tag-toggle` maintains current layout, `tag-view` switches to tag's layout
+  - `tag-view-last` restores previous layout along with previous tags
 - **River-style configuration**
   - Config is a shell script (`~/.config/yashiki/init`)
   - Uses CLI commands for configuration
@@ -97,35 +97,39 @@ Layout engines can return `NeedsRetile` to request a retile after focus changes:
 
 ## CLI Usage
 
+Tags use bitmask format: tag 1 = `$((1<<0))` = 1, tag 2 = `$((1<<1))` = 2, tags 1+2 = 3
+
 ```sh
 yashiki                           # Show help
 yashiki start                     # Start daemon
 yashiki version                   # Show version
-yashiki bind alt-1 view-tag 1     # Bind hotkey
+yashiki bind alt-1 tag-view 1     # Bind hotkey (tag 1 = bitmask 1)
 yashiki unbind alt-1              # Unbind hotkey
 yashiki list-bindings             # List all bindings
-yashiki view-tag 1                # Switch to tag 1 (on focused display)
-yashiki view-tag --output 2 1     # Switch to tag 1 on display 2
-yashiki toggle-view-tag 2         # Toggle tag 2 visibility
-yashiki toggle-view-tag --output "DELL" 2  # Toggle on display by name (partial match)
-yashiki view-tag-last             # Switch to previous tag
-yashiki move-to-tag 1             # Move focused window to tag 1
-yashiki focus-window next         # Focus next window
-yashiki focus-window prev         # Focus previous window
-yashiki focus-window left         # Focus window to the left
-yashiki focus-output next         # Focus next display
-yashiki focus-output prev         # Focus previous display
-yashiki send-to-output next       # Move focused window to next display
-yashiki send-to-output prev       # Move focused window to previous display
+yashiki tag-view 1                # Switch to tag 1 (bitmask 1)
+yashiki tag-view $((1<<1))        # Switch to tag 2 (bitmask 2)
+yashiki tag-view --output 2 1     # Switch to tag 1 on display 2
+yashiki tag-toggle 2              # Toggle tag 2 visibility
+yashiki tag-toggle --output "DELL" 2  # Toggle on display by name (partial match)
+yashiki tag-view-last             # Switch to previous tags
+yashiki window-move-to-tag 1      # Move focused window to tag 1
+yashiki window-toggle-tag 2       # Toggle tag 2 on focused window
+yashiki window-focus next         # Focus next window
+yashiki window-focus prev         # Focus previous window
+yashiki window-focus left         # Focus window to the left
+yashiki output-focus next         # Focus next display
+yashiki output-focus prev         # Focus previous display
+yashiki output-send next          # Move focused window to next display
+yashiki output-send prev          # Move focused window to previous display
 yashiki retile                    # Apply layout (all displays)
 yashiki retile --output 1         # Apply layout on display 1 only
-yashiki set-default-layout tatami       # Set default layout engine
-yashiki set-layout byobu                # Set layout for current tag
-yashiki set-layout --tag 2 byobu        # Set layout for specific tag
-yashiki set-layout --output 2 byobu     # Set layout on specific display
-yashiki get-layout                      # Get current layout
-yashiki get-layout --tag 2              # Get layout for specific tag
-yashiki get-layout --output 2           # Get layout for specific display
+yashiki layout-set-default tatami       # Set default layout engine
+yashiki layout-set byobu                # Set layout for current tag
+yashiki layout-set --tags 2 byobu       # Set layout for specific tags
+yashiki layout-set --output 2 byobu     # Set layout on specific display
+yashiki layout-get                      # Get current layout
+yashiki layout-get --tags 2             # Get layout for specific tags
+yashiki layout-get --output 2           # Get layout for specific display
 yashiki layout-cmd set-main-ratio 0.6   # Send command to layout engine
 yashiki layout-cmd inc-main-count       # Increase main window count
 yashiki layout-cmd zoom                 # Move focused window to main area (tatami)
@@ -145,34 +149,34 @@ yashiki quit                      # Quit daemon
 #!/bin/sh
 
 # Layout configuration (per-tag)
-yashiki set-default-layout tatami       # Default layout for all tags
-yashiki set-layout --tag 3 byobu        # Tag 3 uses byobu layout
+yashiki layout-set-default tatami       # Default layout for all tags
+yashiki layout-set --tags 4 byobu       # Tag 3 uses byobu layout (bitmask 4 = 1<<2)
 
 # Layout toggle script example (save as ~/.config/yashiki/toggle-layout.sh)
-# current=$(yashiki get-layout)
+# current=$(yashiki layout-get)
 # if [ "$current" = "tatami" ]; then
-#   yashiki set-layout byobu
+#   yashiki layout-set byobu
 # else
-#   yashiki set-layout tatami
+#   yashiki layout-set tatami
 # fi
 # Usage: yashiki bind alt-space exec ~/.config/yashiki/toggle-layout.sh
 
-# Tag bindings
-yashiki bind alt-1 view-tag 1
-yashiki bind alt-2 view-tag 2
-yashiki bind alt-3 view-tag 3
-yashiki bind alt-shift-1 move-to-tag 1
-yashiki bind alt-shift-2 move-to-tag 2
-yashiki bind alt-shift-3 move-to-tag 3
-yashiki bind alt-tab focus-window next
-yashiki bind alt-shift-tab focus-window prev
+# Tag bindings (using bitmask: tag N = $((1<<(N-1))))
+yashiki bind alt-1 tag-view 1           # Tag 1 = bitmask 1
+yashiki bind alt-2 tag-view 2           # Tag 2 = bitmask 2
+yashiki bind alt-3 tag-view 4           # Tag 3 = bitmask 4
+yashiki bind alt-shift-1 window-move-to-tag 1
+yashiki bind alt-shift-2 window-move-to-tag 2
+yashiki bind alt-shift-3 window-move-to-tag 4
+yashiki bind alt-tab window-focus next
+yashiki bind alt-shift-tab window-focus prev
 yashiki bind alt-return retile
 yashiki bind alt-comma layout-cmd inc-main-count
 yashiki bind alt-period layout-cmd dec-main-count
 yashiki bind alt-h layout-cmd dec-main-ratio
 yashiki bind alt-l layout-cmd inc-main-ratio
-yashiki bind alt-o focus-output next
-yashiki bind alt-shift-o send-to-output next
+yashiki bind alt-o output-focus next
+yashiki bind alt-shift-o output-send next
 
 # Gap configuration (sent to currently active layout engine)
 yashiki layout-cmd set-inner-gap 10
@@ -199,7 +203,7 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 - **core/display.rs** - Display struct with visible_tags per display
 - **core/state.rs** - Window and display state management
   - Multi-monitor: `displays`, `focused_display`, per-display visible_tags
-  - Tag operations: `view_tag()`, `toggle_view_tag_on_display()`, `move_focused_to_tag()`, `toggle_focused_window_tag()`
+  - Tag operations: `view_tags()`, `toggle_tags_on_display()`, `move_focused_to_tags()`, `toggle_focused_window_tags()`
   - Focus: `focus_window()` - stack-based (next/prev) and geometry-based (left/right/up/down)
   - Output: `focus_output()`, `send_to_output()` - move focus/window between displays
   - Display targeting: `resolve_output()`, `get_target_display()` - resolve OutputSpecifier to DisplayId
@@ -249,8 +253,8 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
   - `set-orientation <horizontal|h|vertical|v>`, `toggle-orientation`
 
 ### Not Yet Implemented
-- `SwapWindow` command (swap positions with window in direction)
-- `CloseWindow` / `ToggleFloat`
+- `WindowSwap` command (swap positions with window in direction)
+- `WindowClose` / `WindowToggleFloat`
 
 ## Development Notes
 
@@ -308,12 +312,12 @@ Focus involves: `activate_application(pid)` then `AXUIElement.raise()`
 - Each `Display` has its own `visible_tags`
 - `State.focused_display` tracks which display has focus
 - Focus changes update `focused_display` based on window's `display_id`
-- Tag operations (`view_tag`, etc.) affect only `focused_display` by default
+- Tag operations (`tag-view`, etc.) affect only `focused_display` by default
 - `--output` option allows targeting specific display by ID or name (partial match)
 - Window's display determined by center point location
 - Layout applied independently per display with display offset
-- `focus_output`: cycles displays by sorted ID, focuses first visible window on target
-- `send_to_output`: moves window to target display, updates `focused_display`, retiles both displays
+- `output-focus`: cycles displays by sorted ID, focuses first visible window on target
+- `output-send`: moves window to target display, updates `focused_display`, retiles both displays
 
 ### Monitor Disconnection Handling
 - Listens for `NSApplicationDidChangeScreenParametersNotification`
@@ -342,11 +346,11 @@ Focus involves: `activate_application(pid)` then `AXUIElement.raise()`
 - Layout determination logic:
   | Operation | Layout Behavior |
   |-----------|-----------------|
-  | `view_tag(N)` | Switch to `tag_layouts[N]` or `default_layout` |
-  | `toggle_view_tag(N)` | **Maintain** current layout (no change) |
-  | `view_tag_last` | Swap `current_layout` ↔ `previous_layout` |
-  | `set-layout <layout>` | Set for current tag + immediate retile |
-  | `set-layout --tag N <layout>` | Set for tag N (applied when switching to that tag) |
+  | `tag-view N` | Switch to `tag_layouts[first_tag(N)]` or `default_layout` |
+  | `tag-toggle N` | **Maintain** current layout (no change) |
+  | `tag-view-last` | Swap `current_layout` ↔ `previous_layout` |
+  | `layout-set <layout>` | Set for current tag + immediate retile |
+  | `layout-set --tags N <layout>` | Set for tag N (applied when switching to that tag) |
 - `LayoutEngineManager` spawns engines lazily on first use and keeps them running
 - Each engine maintains its own state (main_ratio, gaps, etc.) independently
 - `layout-cmd` sends commands to the currently active layout engine
@@ -408,11 +412,11 @@ fn process_command(
     cmd: &Command,
 ) -> CommandResult {
     match cmd {
-        Command::ViewTag { tag } => {
-            let moves = state.view_tag(*tag);
+        Command::TagView { tags, output } => {
+            let moves = state.view_tags_on_display(*tags, display_id);
             CommandResult::ok_with_effects(vec![
                 Effect::ApplyWindowMoves(moves),
-                Effect::Retile,
+                Effect::RetileDisplays(vec![display_id]),
                 Effect::FocusVisibleWindowIfNeeded,
             ])
         }
