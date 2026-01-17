@@ -11,8 +11,9 @@ pub struct LayoutEngine {
 }
 
 impl LayoutEngine {
-    pub fn spawn(command: &str) -> Result<Self> {
-        let mut child = Command::new(command)
+    pub fn spawn(name: &str) -> Result<Self> {
+        let command = format!("yashiki-layout-{}", name);
+        let mut child = Command::new(&command)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

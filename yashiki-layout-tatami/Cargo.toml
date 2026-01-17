@@ -1,5 +1,5 @@
 [package]
-name = "tatami"
+name = "yashiki-layout-tatami"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

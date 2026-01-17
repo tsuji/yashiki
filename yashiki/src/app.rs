@@ -7,6 +7,7 @@ use crate::macos::{
     activate_application, AXUIElement, HotkeyManager, ObserverManager, WorkspaceEvent,
     WorkspaceWatcher,
 };
+use crate::pid;
 use anyhow::Result;
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
 use core_graphics::geometry::{CGPoint, CGSize};
@@ -34,9 +35,20 @@ pub struct App {}
 
 impl App {
     pub fn run() -> Result<()> {
+        // Check if already running
+        if let Some(existing_pid) = pid::check_already_running() {
+            anyhow::bail!("yashiki is already running (pid: {})", existing_pid);
+        }
+
+        // Write PID file
+        if let Err(e) = pid::write_pid() {
+            tracing::warn!("Failed to write PID file: {}", e);
+        }
+
         if !macos::is_trusted() {
             tracing::warn!("Accessibility permission not granted, requesting...");
             macos::is_trusted_with_prompt();
+            pid::remove_pid();
             anyhow::bail!("Please grant Accessibility permission and restart");
         }
 
@@ -63,6 +75,8 @@ impl App {
         let app = App {};
         app.run_main_loop(ipc_cmd_rx, observer_event_tx, observer_event_rx, event_tx);
 
+        // Clean up PID file on exit
+        pid::remove_pid();
         Ok(())
     }
 

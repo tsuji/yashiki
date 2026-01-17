@@ -5,14 +5,16 @@ macOS tiling window manager written in Rust.
 ## Project Structure
 
 ```
-yashiki/          # WM core daemon + CLI
-yashiki-ipc/      # Shared protocol definitions (commands, layout)
-tatami/           # Default tile layout engine (master-stack)
+yashiki/                  # WM core daemon + CLI
+yashiki-ipc/              # Shared protocol definitions (commands, layout)
+yashiki-layout-tatami/    # Default tile layout engine (master-stack)
 ```
 
 Future components:
 - `engawa/` - Status bar
-- Other layout engines: `rasen` (spiral), `koushi` (grid)
+- Other layout engines: `yashiki-layout-rasen` (spiral), `yashiki-layout-koushi` (grid)
+
+Layout engine naming convention: `yashiki-layout-<name>` (e.g., `yashiki-layout-tatami`)
 
 ## Architecture
 
@@ -164,7 +166,7 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 - **main.rs** - Daemon + CLI mode
 - **yashiki-ipc/** - Command/Response/LayoutMessage enums
 
-### tatami (layout engine)
+### yashiki-layout-tatami (layout engine)
 - Master-stack layout
 - Internal state: main_count, main_ratio, inner_gap, outer_gap, smart_gaps
 - Commands:
