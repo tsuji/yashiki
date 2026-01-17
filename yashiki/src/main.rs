@@ -177,6 +177,23 @@ fn parse_command(args: &[String]) -> Result<Command> {
         "list-windows" => Ok(Command::ListWindows),
         "get-state" => Ok(Command::GetState),
         "focused-window" => Ok(Command::FocusedWindow),
+        "exec" => {
+            if rest.is_empty() {
+                bail!("Usage: yashiki exec <command>");
+            }
+            Ok(Command::Exec {
+                command: rest[0].clone(),
+            })
+        }
+        "exec-or-focus" => {
+            // Parse: exec-or-focus --app-name <name> <command>
+            if rest.len() < 3 || rest[0] != "--app-name" {
+                bail!("Usage: yashiki exec-or-focus --app-name <name> <command>");
+            }
+            let app_name = rest[1].clone();
+            let command = rest[2].clone();
+            Ok(Command::ExecOrFocus { app_name, command })
+        }
         "quit" => Ok(Command::Quit),
         _ => bail!("Unknown command: {}", cmd),
     }

@@ -35,6 +35,10 @@ pub enum Command {
     GetState,
     FocusedWindow,
 
+    // Exec
+    Exec { command: String },
+    ExecOrFocus { app_name: String, command: String },
+
     // Control
     Quit,
 }

@@ -26,6 +26,24 @@ pub fn activate_application(pid: i32) -> bool {
     false
 }
 
+pub fn exec_command(command: &str) -> Result<(), String> {
+    match std::process::Command::new("/bin/bash")
+        .arg("-c")
+        .arg(command)
+        .spawn()
+    {
+        Ok(_) => {
+            tracing::info!("Executed command: {}", command);
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("Failed to execute command '{}': {}", command, e);
+            tracing::error!("{}", msg);
+            Err(msg)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum WorkspaceEvent {
     AppLaunched { pid: i32 },

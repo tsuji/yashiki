@@ -494,6 +494,69 @@ fn handle_ipc_command(
             tracing::info!("Quit command received");
             Response::Ok
         }
+        Command::Exec { command } => match macos::exec_command(command) {
+            Ok(()) => Response::Ok,
+            Err(message) => Response::Error { message },
+        },
+        Command::ExecOrFocus { app_name, command } => {
+            // Check if a window with the given app_name exists
+            let existing_window = {
+                let s = state.borrow();
+                s.windows
+                    .values()
+                    .find(|w| w.app_name == *app_name)
+                    .map(|w| (w.id, w.pid, w.tags, w.display_id, w.is_hidden()))
+            };
+
+            if let Some((window_id, pid, window_tags, window_display_id, is_hidden)) =
+                existing_window
+            {
+                // Check if window is visible on its display
+                let is_visible = {
+                    let s = state.borrow();
+                    if let Some(display) = s.displays.get(&window_display_id) {
+                        window_tags.intersects(display.visible_tags) && !is_hidden
+                    } else {
+                        false
+                    }
+                };
+
+                if is_visible {
+                    tracing::info!(
+                        "Focusing visible window for app '{}' (window_id={}, pid={})",
+                        app_name,
+                        window_id,
+                        pid
+                    );
+                    focus_window_by_id(&state.borrow(), window_id, pid);
+                } else {
+                    // Window is hidden, switch to its tag first
+                    if let Some(tag) = window_tags.first_tag() {
+                        tracing::info!(
+                            "Switching to tag {} and focusing window for app '{}' (window_id={}, pid={})",
+                            tag,
+                            app_name,
+                            window_id,
+                            pid
+                        );
+                        let moves = state.borrow_mut().view_tag(tag);
+                        apply_window_moves(&moves);
+                        do_retile(&state, &mut layout_engine.borrow_mut());
+                    }
+                    focus_window_by_id(&state.borrow(), window_id, pid);
+                }
+                Response::Ok
+            } else {
+                tracing::info!(
+                    "No existing window for app '{}', executing command",
+                    app_name
+                );
+                match macos::exec_command(command) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                }
+            }
+        }
         _ => {
             tracing::warn!("Unhandled command: {:?}", cmd);
             Response::Error {

@@ -100,6 +100,8 @@ yashiki layout-cmd set-main-ratio 0.6   # Send command to layout engine
 yashiki layout-cmd inc-main-count       # Increase main window count
 yashiki list-windows              # List all windows
 yashiki get-state                 # Get current state
+yashiki exec "open -a Safari"     # Execute shell command
+yashiki exec-or-focus --app-name Safari "open -a Safari"  # Focus if running, else exec
 yashiki quit                      # Quit daemon
 ```
 
@@ -126,6 +128,10 @@ yashiki bind alt-shift-o send-to-output next
 yashiki layout-cmd set-inner-gap 10
 yashiki layout-cmd set-outer-gap 10
 yashiki layout-cmd set-smart-gaps off
+
+# App launchers
+yashiki bind alt-return exec "open -n /Applications/Ghostty.app"
+yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 ```
 
 ## Implementation Status
@@ -136,7 +142,7 @@ yashiki layout-cmd set-smart-gaps off
 - **macos/display.rs** - CGWindowList window enumeration, display info
   - `get_on_screen_windows()`, `get_all_displays()` (uses NSScreen visibleFrame)
 - **macos/observer.rs** - AXObserver for window events
-- **macos/workspace.rs** - NSWorkspace app launch/terminate notifications, `activate_application()`, `get_frontmost_app_pid()`
+- **macos/workspace.rs** - NSWorkspace app launch/terminate notifications, `activate_application()`, `get_frontmost_app_pid()`, `exec_command()`
 - **macos/hotkey.rs** - CGEventTap global hotkeys
   - `HotkeyManager` with dynamic bind/unbind
   - Tap recreation on binding changes
