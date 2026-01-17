@@ -31,7 +31,10 @@ Layout engine naming convention: `yashiki-layout-<name>` (e.g., `yashiki-layout-
 
 ### Communication
 
-- IPC commands: tokio → main thread via `std::sync::mpsc`
+- IPC commands: tokio → main thread via `std::sync::mpsc` + `CFRunLoopSource`
+  - Commands are queued via mpsc channel
+  - `CFRunLoopSourceSignal` + `CFRunLoopWakeUp` wakes up main thread immediately
+  - No polling delay for IPC command processing
 - Hotkey commands: CGEventTap callback → main thread via `std::sync::mpsc`
 - Layout engine: stdin/stdout JSON (synchronous, from main thread)
 
@@ -199,7 +202,7 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 - **macos/workspace.rs** - NSWorkspace app launch/terminate notifications, display change notifications, `activate_application()`, `get_frontmost_app_pid()`, `exec_command()`
 - **macos/hotkey.rs** - CGEventTap global hotkeys
   - `HotkeyManager` with dynamic bind/unbind
-  - Tap recreation on binding changes
+  - Deferred tap recreation via dirty flag (batches multiple bind/unbind calls)
 - **core/display.rs** - Display struct with visible_tags per display
 - **core/state.rs** - Window and display state management
   - Multi-monitor: `displays`, `focused_display`, per-display visible_tags
@@ -215,8 +218,9 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 - **layout.rs** - `LayoutEngine` and `LayoutEngineManager`
   - `LayoutEngine` spawns and communicates with a single layout engine process
   - `LayoutEngineManager` manages multiple engines with lazy spawning
-- **app.rs** - Main event loop with CFRunLoop timer
-  - Processes: IPC commands, hotkey commands, workspace events, observer events
+- **app.rs** - Main event loop with CFRunLoop
+  - CFRunLoopSource for immediate IPC command processing
+  - CFRunLoop timer (50ms) for hotkey commands, workspace events, observer events, and deferred hotkey tap updates
   - Auto-retile on window add/remove
   - Runs init script at startup
   - Effect pattern: `process_command()` (pure) + `execute_effects()` (side effects)
@@ -269,6 +273,7 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 Key crates:
 - `argh` - CLI argument parsing
 - `core-foundation` (0.10) - macOS Core Foundation bindings
+- `core-foundation-sys` (0.8) - Low-level Core Foundation FFI (CFRunLoopSource, etc.)
 - `core-graphics` (0.25) - CGWindowList, CGEventTap, display info
 - `objc2`, `objc2-app-kit`, `objc2-foundation` - NSScreen, NSWorkspace bindings
 - `tokio` - async runtime for IPC server
@@ -292,7 +297,9 @@ Key crates:
 
 ### Hotkey Dynamic Update
 - Bindings stored in `HashMap<Hotkey, Command>` on main thread
-- When `bind`/`unbind` called, CGEventTap is recreated with new bindings clone
+- `bind()`/`unbind()` sets `dirty = true` without recreating tap
+- `ensure_tap()` called in timer callback (50ms interval) recreates tap only if dirty
+- This batches multiple bind/unbind calls during init script execution
 - No Mutex needed - tap callback gets owned clone of bindings
 
 ### Focus Direction

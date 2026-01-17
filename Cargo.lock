@@ -860,6 +860,7 @@ dependencies = [
  "anyhow",
  "argh",
  "core-foundation",
+ "core-foundation-sys",
  "core-graphics",
  "dirs",
  "dispatch",

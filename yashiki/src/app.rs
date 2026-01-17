@@ -8,10 +8,18 @@ use crate::macos::{HotkeyManager, ObserverManager, WorkspaceEvent, WorkspaceWatc
 use crate::pid;
 use crate::platform::{MacOSWindowManipulator, MacOSWindowSystem, WindowManipulator};
 use anyhow::Result;
+use core_foundation::base::TCFType;
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
+use core_foundation_sys::runloop::{
+    CFRunLoopAddSource, CFRunLoopGetMain, CFRunLoopSourceContext, CFRunLoopSourceCreate,
+    CFRunLoopSourceRef, CFRunLoopSourceSignal, CFRunLoopWakeUp,
+};
 use objc2_foundation::MainThreadMarker;
 use std::cell::RefCell;
+use std::ptr;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use yashiki_ipc::{BindingInfo, Command, OutputInfo, Response, StateInfo, WindowInfo};
 
@@ -64,16 +72,26 @@ impl App {
         // Channel for IPC server (tokio internal)
         let (ipc_tx, ipc_rx) = mpsc::channel::<IpcCommandWithResponse>(256);
 
+        // Shared pointer to CFRunLoopSource (will be set by main thread)
+        let ipc_source = Arc::new(AtomicPtr::new(ptr::null_mut()));
+        let ipc_source_clone = Arc::clone(&ipc_source);
+
         // Spawn tokio runtime in separate thread
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async move {
-                Self::run_async(ipc_cmd_tx, ipc_tx, ipc_rx, event_rx).await;
+                Self::run_async(ipc_cmd_tx, ipc_tx, ipc_rx, event_rx, ipc_source_clone).await;
             });
         });
 
         let app = App {};
-        app.run_main_loop(ipc_cmd_rx, observer_event_tx, observer_event_rx, event_tx);
+        app.run_main_loop(
+            ipc_cmd_rx,
+            observer_event_tx,
+            observer_event_rx,
+            event_tx,
+            ipc_source,
+        );
 
         // Clean up PID file on exit
         pid::remove_pid();
@@ -85,6 +103,7 @@ impl App {
         ipc_server_tx: mpsc::Sender<IpcCommandWithResponse>,
         mut ipc_rx: mpsc::Receiver<IpcCommandWithResponse>,
         mut event_rx: mpsc::Receiver<Event>,
+        ipc_source: Arc<AtomicPtr<std::ffi::c_void>>,
     ) {
         tracing::info!("Tokio runtime started");
 
@@ -104,6 +123,14 @@ impl App {
                         tracing::error!("Failed to forward IPC command to main thread");
                         break;
                     }
+                    // Wake up the main thread's RunLoop immediately
+                    let source = ipc_source.load(Ordering::Acquire);
+                    if !source.is_null() {
+                        unsafe {
+                            CFRunLoopSourceSignal(source as CFRunLoopSourceRef);
+                            CFRunLoopWakeUp(CFRunLoopGetMain());
+                        }
+                    }
                 }
                 Some(event) = event_rx.recv() => {
                     tracing::debug!("Received event: {:?}", event);
@@ -121,6 +148,7 @@ impl App {
         observer_event_tx: std_mpsc::Sender<Event>,
         observer_event_rx: std_mpsc::Receiver<Event>,
         event_tx: mpsc::Sender<Event>,
+        ipc_source_ptr: Arc<AtomicPtr<std::ffi::c_void>>,
     ) {
         tracing::info!("Starting main loop");
 
@@ -159,7 +187,7 @@ impl App {
             tracing::warn!("Failed to start hotkey tap: {}", e);
         }
 
-        // Set up a timer to check for commands and events periodically
+        // Create shared context for timer and IPC source
         let context = Box::new(RunLoopContext {
             ipc_cmd_rx,
             hotkey_cmd_rx,
@@ -173,21 +201,13 @@ impl App {
             window_system,
             window_manipulator,
         });
-        let mut timer_context = core_foundation::runloop::CFRunLoopTimerContext {
-            version: 0,
-            info: Box::into_raw(context) as *mut _,
-            retain: None,
-            release: None,
-            copyDescription: None,
-        };
+        let context_ptr = Box::into_raw(context) as *mut std::ffi::c_void;
 
-        extern "C" fn timer_callback(
-            _timer: core_foundation::runloop::CFRunLoopTimerRef,
-            info: *mut std::ffi::c_void,
-        ) {
+        // Create CFRunLoopSource for IPC commands (immediate processing)
+        extern "C" fn ipc_source_callback(info: *const std::ffi::c_void) {
             let ctx = unsafe { &*(info as *const RunLoopContext) };
 
-            // Process IPC commands
+            // Process all pending IPC commands
             while let Ok((cmd, resp_tx)) = ctx.ipc_cmd_rx.try_recv() {
                 tracing::debug!("Received IPC command: {:?}", cmd);
                 let response = handle_ipc_command(
@@ -204,6 +224,53 @@ impl App {
                     CFRunLoop::get_current().stop();
                 }
             }
+            // Note: ensure_tap is called in timer_callback to batch hotkey binding changes
+        }
+
+        let mut source_context = CFRunLoopSourceContext {
+            version: 0,
+            info: context_ptr,
+            retain: None,
+            release: None,
+            copyDescription: None,
+            equal: None,
+            hash: None,
+            schedule: None,
+            cancel: None,
+            perform: ipc_source_callback,
+        };
+
+        let ipc_source = unsafe { CFRunLoopSourceCreate(ptr::null(), 0, &mut source_context) };
+        if ipc_source.is_null() {
+            tracing::error!("Failed to create CFRunLoopSource for IPC");
+        } else {
+            // Register source with main RunLoop
+            let run_loop = CFRunLoop::get_current();
+            unsafe {
+                CFRunLoopAddSource(
+                    run_loop.as_concrete_TypeRef(),
+                    ipc_source,
+                    kCFRunLoopDefaultMode,
+                );
+            }
+            // Share source pointer with tokio thread
+            ipc_source_ptr.store(ipc_source as *mut std::ffi::c_void, Ordering::Release);
+            tracing::info!("IPC CFRunLoopSource created and registered");
+        }
+
+        let mut timer_context = core_foundation::runloop::CFRunLoopTimerContext {
+            version: 0,
+            info: context_ptr,
+            retain: None,
+            release: None,
+            copyDescription: None,
+        };
+
+        extern "C" fn timer_callback(
+            _timer: core_foundation::runloop::CFRunLoopTimerRef,
+            info: *mut std::ffi::c_void,
+        ) {
+            let ctx = unsafe { &*(info as *const RunLoopContext) };
 
             // Process hotkey commands (no response needed)
             while let Ok(cmd) = ctx.hotkey_cmd_rx.try_recv() {
@@ -313,6 +380,11 @@ impl App {
                     &ctx.window_manipulator,
                 );
             }
+
+            // Apply pending hotkey binding changes (deferred tap recreation)
+            if let Err(e) = ctx.hotkey_manager.borrow_mut().ensure_tap() {
+                tracing::error!("Failed to update hotkey tap: {}", e);
+            }
         }
 
         let timer = unsafe {
@@ -360,15 +432,21 @@ fn run_init_script() {
     // Small delay to ensure IPC server is ready
     std::thread::sleep(std::time::Duration::from_millis(100));
 
+    let start = std::time::Instant::now();
     match std::process::Command::new(&init_script)
         .current_dir(&config_dir)
         .status()
     {
         Ok(status) => {
+            let elapsed = start.elapsed();
             if status.success() {
-                tracing::info!("Init script completed successfully");
+                tracing::info!("Init script completed in {:.2?}", elapsed);
             } else {
-                tracing::warn!("Init script exited with status: {}", status);
+                tracing::warn!(
+                    "Init script exited with status: {} (took {:.2?})",
+                    status,
+                    elapsed
+                );
             }
         }
         Err(e) => {

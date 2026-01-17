@@ -70,6 +70,7 @@ pub struct HotkeyManager {
     bindings: HashMap<Hotkey, Command>,
     command_tx: mpsc::Sender<Command>,
     tap: Option<HotkeyTap>,
+    dirty: bool,
 }
 
 impl HotkeyManager {
@@ -78,6 +79,7 @@ impl HotkeyManager {
             bindings: HashMap::new(),
             command_tx,
             tap: None,
+            dirty: false,
         }
     }
 
@@ -85,10 +87,7 @@ impl HotkeyManager {
         let hotkey = parse_hotkey(key_str)?;
         tracing::info!("Binding {} to {:?}", key_str, command);
         self.bindings.insert(hotkey, command);
-
-        if self.tap.is_some() {
-            self.restart_tap()?;
-        }
+        self.dirty = true;
         Ok(())
     }
 
@@ -96,10 +95,7 @@ impl HotkeyManager {
         let hotkey = parse_hotkey(key_str)?;
         self.bindings.remove(&hotkey);
         tracing::info!("Unbound {}", key_str);
-
-        if self.tap.is_some() {
-            self.restart_tap()?;
-        }
+        self.dirty = true;
         Ok(())
     }
 
@@ -112,13 +108,19 @@ impl HotkeyManager {
 
     pub fn start(&mut self) -> Result<(), String> {
         self.tap = Some(self.create_tap()?);
+        self.dirty = false;
         tracing::info!("Hotkey tap started with {} bindings", self.bindings.len());
         Ok(())
     }
 
-    fn restart_tap(&mut self) -> Result<(), String> {
-        self.tap = Some(self.create_tap()?);
-        tracing::info!("Hotkey tap restarted with {} bindings", self.bindings.len());
+    /// Ensure tap is up-to-date with current bindings.
+    /// Call this periodically (e.g., in timer callback) to apply pending changes.
+    pub fn ensure_tap(&mut self) -> Result<(), String> {
+        if self.dirty && self.tap.is_some() {
+            self.tap = Some(self.create_tap()?);
+            self.dirty = false;
+            tracing::info!("Hotkey tap updated with {} bindings", self.bindings.len());
+        }
         Ok(())
     }
 
