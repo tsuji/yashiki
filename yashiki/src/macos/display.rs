@@ -1,14 +1,13 @@
 use core_foundation::{
     array::CFArray, base::TCFType, dictionary::CFDictionary, number::CFNumber, string::CFString,
 };
-use core_graphics::display::{CGDisplay, CGMainDisplayID};
+use core_graphics::display::CGMainDisplayID;
 use core_graphics::window::{
     kCGNullWindowID, kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly,
     CGWindowListCopyWindowInfo,
 };
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSScreen;
-use std::collections::HashSet;
 
 pub type DisplayId = u32;
 
@@ -72,12 +71,6 @@ pub fn get_on_screen_windows() -> Vec<WindowInfo> {
     windows
 }
 
-pub fn get_running_app_pids() -> Vec<i32> {
-    let windows = get_on_screen_windows();
-    let pids: HashSet<i32> = windows.iter().map(|w| w.pid).collect();
-    pids.into_iter().collect()
-}
-
 fn parse_window_info(dict: &CFDictionary) -> Option<WindowInfo> {
     let pid = get_number(dict, "kCGWindowOwnerPID")?.to_i32()?;
     let window_id = get_number(dict, "kCGWindowNumber")?.to_i32()? as u32;
@@ -131,14 +124,6 @@ fn parse_bounds(dict: &CFDictionary, key: &str) -> Option<Bounds> {
             height,
         })
     }
-}
-
-pub fn get_main_display_size() -> (u32, u32) {
-    let display_id = unsafe { CGMainDisplayID() };
-    let display = CGDisplay::new(display_id);
-    let width = display.pixels_wide() as u32;
-    let height = display.pixels_high() as u32;
-    (width, height)
 }
 
 pub fn get_all_displays() -> Vec<DisplayInfo> {

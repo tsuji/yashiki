@@ -311,10 +311,6 @@ pub mod mock {
             self
         }
 
-        pub fn set_focused(&mut self, window_id: Option<u32>) {
-            self.focused_window_id = window_id;
-        }
-
         pub fn add_window(&mut self, info: WindowInfo) {
             self.windows.push(info);
         }
@@ -379,103 +375,6 @@ pub mod mock {
                 height,
             },
             layer: 0,
-        }
-    }
-
-    use std::cell::RefCell;
-
-    #[derive(Debug, Clone, PartialEq)]
-    pub enum RecordedOperation {
-        ApplyWindowMoves(Vec<WindowMove>),
-        ApplyLayout {
-            display_id: DisplayId,
-            frame: Rect,
-            geometries: Vec<WindowGeometry>,
-        },
-        FocusWindow {
-            window_id: u32,
-            pid: i32,
-        },
-        MoveWindowToPosition {
-            window_id: u32,
-            pid: i32,
-            x: i32,
-            y: i32,
-        },
-        ExecCommand(String),
-    }
-
-    pub struct MockWindowManipulator {
-        pub operations: RefCell<Vec<RecordedOperation>>,
-        pub exec_result: RefCell<Result<(), String>>,
-    }
-
-    impl Default for MockWindowManipulator {
-        fn default() -> Self {
-            Self {
-                operations: RefCell::new(Vec::new()),
-                exec_result: RefCell::new(Ok(())),
-            }
-        }
-    }
-
-    impl MockWindowManipulator {
-        pub fn new() -> Self {
-            Self::default()
-        }
-
-        pub fn set_exec_result(&self, result: Result<(), String>) {
-            *self.exec_result.borrow_mut() = result;
-        }
-
-        pub fn get_operations(&self) -> Vec<RecordedOperation> {
-            self.operations.borrow().clone()
-        }
-
-        pub fn clear_operations(&self) {
-            self.operations.borrow_mut().clear();
-        }
-    }
-
-    impl WindowManipulator for MockWindowManipulator {
-        fn apply_window_moves(&self, moves: &[WindowMove]) {
-            self.operations
-                .borrow_mut()
-                .push(RecordedOperation::ApplyWindowMoves(moves.to_vec()));
-        }
-
-        fn apply_layout(&self, display_id: DisplayId, frame: &Rect, geometries: &[WindowGeometry]) {
-            self.operations
-                .borrow_mut()
-                .push(RecordedOperation::ApplyLayout {
-                    display_id,
-                    frame: *frame,
-                    geometries: geometries.to_vec(),
-                });
-        }
-
-        fn focus_window(&self, window_id: u32, pid: i32) {
-            self.operations
-                .borrow_mut()
-                .push(RecordedOperation::FocusWindow { window_id, pid });
-        }
-
-        fn move_window_to_position(&self, window_id: u32, pid: i32, x: i32, y: i32) {
-            self.operations
-                .borrow_mut()
-                .push(RecordedOperation::MoveWindowToPosition {
-                    window_id,
-                    pid,
-                    x,
-                    y,
-                });
-        }
-
-        fn exec_command(&self, command: &str) -> Result<(), String> {
-            self.operations
-                .borrow_mut()
-                .push(RecordedOperation::ExecCommand(command.to_string()));
-            self.exec_result.borrow().clone()
         }
     }
 }

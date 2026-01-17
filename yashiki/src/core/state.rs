@@ -259,7 +259,7 @@ impl State {
                 self.sync_pid(ws, *pid);
                 false
             }
-            Event::FocusedWindowChanged { .. } => {
+            Event::FocusedWindowChanged => {
                 self.sync_focused_window(ws);
                 false
             }
@@ -267,9 +267,9 @@ impl State {
                 self.sync_focused_window_with_hint(ws, Some(*pid));
                 false
             }
-            Event::ApplicationDeactivated { .. }
-            | Event::ApplicationHidden { .. }
-            | Event::ApplicationShown { .. } => false,
+            Event::ApplicationDeactivated | Event::ApplicationHidden | Event::ApplicationShown => {
+                false
+            }
         }
     }
 

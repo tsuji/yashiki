@@ -13,9 +13,6 @@ use std::ptr;
 pub type AXError = i32;
 pub const AX_ERROR_SUCCESS: AXError = 0;
 pub const AX_ERROR_FAILURE: AXError = -25200;
-pub const AX_ERROR_INVALID_UIELEMENT: AXError = -25202;
-pub const AX_ERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25205;
-pub const AX_ERROR_NO_VALUE: AXError = -25212;
 
 #[repr(C)]
 pub struct __AXUIElement(c_void);

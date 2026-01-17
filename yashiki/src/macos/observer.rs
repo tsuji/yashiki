@@ -97,32 +97,6 @@ impl ObserverManager {
             tracing::debug!("Removed observer for pid {}", pid);
         }
     }
-
-    pub fn refresh(&mut self) {
-        let windows = get_on_screen_windows();
-        let mut current_pids: Vec<i32> = windows.iter().map(|w| w.pid).collect();
-        current_pids.sort();
-        current_pids.dedup();
-
-        for pid in &current_pids {
-            if !self.observers.contains_key(pid) {
-                if let Err(e) = self.add_observer(*pid) {
-                    tracing::debug!("Failed to add observer for new pid {}: {}", pid, e);
-                }
-            }
-        }
-
-        let stale_pids: Vec<i32> = self
-            .observers
-            .keys()
-            .filter(|pid| !current_pids.contains(pid))
-            .copied()
-            .collect();
-
-        for pid in stale_pids {
-            self.remove_observer(pid);
-        }
-    }
 }
 
 extern "C" fn observer_callback(
@@ -142,9 +116,7 @@ extern "C" fn observer_callback(
     let event = match notif_str.as_str() {
         notification::WINDOW_CREATED => Some(Event::WindowCreated { pid: context.pid }),
         notification::UI_ELEMENT_DESTROYED => Some(Event::WindowDestroyed { pid: context.pid }),
-        notification::FOCUSED_WINDOW_CHANGED => {
-            Some(Event::FocusedWindowChanged { pid: context.pid })
-        }
+        notification::FOCUSED_WINDOW_CHANGED => Some(Event::FocusedWindowChanged),
         notification::WINDOW_MOVED => Some(Event::WindowMoved { pid: context.pid }),
         notification::WINDOW_RESIZED => Some(Event::WindowResized { pid: context.pid }),
         notification::WINDOW_MINIATURIZED => Some(Event::WindowMiniaturized { pid: context.pid }),
@@ -154,11 +126,9 @@ extern "C" fn observer_callback(
         notification::APPLICATION_ACTIVATED => {
             Some(Event::ApplicationActivated { pid: context.pid })
         }
-        notification::APPLICATION_DEACTIVATED => {
-            Some(Event::ApplicationDeactivated { pid: context.pid })
-        }
-        notification::APPLICATION_HIDDEN => Some(Event::ApplicationHidden { pid: context.pid }),
-        notification::APPLICATION_SHOWN => Some(Event::ApplicationShown { pid: context.pid }),
+        notification::APPLICATION_DEACTIVATED => Some(Event::ApplicationDeactivated),
+        notification::APPLICATION_HIDDEN => Some(Event::ApplicationHidden),
+        notification::APPLICATION_SHOWN => Some(Event::ApplicationShown),
         _ => {
             tracing::debug!("Unknown notification: {}", notif_str);
             None

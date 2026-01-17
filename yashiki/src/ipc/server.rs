@@ -18,10 +18,6 @@ impl IpcServer {
         }
     }
 
-    pub fn socket_path(&self) -> &PathBuf {
-        &self.socket_path
-    }
-
     pub async fn run(&self) -> Result<()> {
         // Remove existing socket file if it exists
         if self.socket_path.exists() {

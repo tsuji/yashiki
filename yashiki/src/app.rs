@@ -249,7 +249,7 @@ impl App {
             while let Ok(event) = ctx.observer_event_rx.try_recv() {
                 let is_focus_event = matches!(
                     event,
-                    Event::FocusedWindowChanged { .. } | Event::ApplicationActivated { .. }
+                    Event::FocusedWindowChanged | Event::ApplicationActivated { .. }
                 );
 
                 if ctx
@@ -595,13 +595,6 @@ fn execute_effects<M: WindowManipulator>(
             Effect::ApplyWindowMoves(moves) => {
                 manipulator.apply_window_moves(&moves);
             }
-            Effect::ApplyLayout {
-                display_id,
-                frame,
-                geometries,
-            } => {
-                manipulator.apply_layout(display_id, &frame, &geometries);
-            }
             Effect::FocusWindow { window_id, pid } => {
                 manipulator.focus_window(window_id, pid);
             }
@@ -615,9 +608,6 @@ fn execute_effects<M: WindowManipulator>(
             }
             Effect::Retile => {
                 do_retile(state, layout_engine, manipulator);
-            }
-            Effect::RetileDisplay(display_id) => {
-                do_retile_display(state, layout_engine, manipulator, display_id);
             }
             Effect::RetileDisplays(display_ids) => {
                 for display_id in display_ids {
@@ -639,15 +629,6 @@ fn execute_effects<M: WindowManipulator>(
             }
             Effect::FocusVisibleWindowIfNeeded => {
                 focus_visible_window_if_needed(state, manipulator);
-            }
-            Effect::UpdateWindowOrder {
-                display_id,
-                window_ids,
-            } => {
-                let mut state = state.borrow_mut();
-                if let Some(display) = state.displays.get_mut(&display_id) {
-                    display.window_order = window_ids;
-                }
             }
         }
     }

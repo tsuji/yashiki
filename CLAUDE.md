@@ -266,12 +266,12 @@ Focus involves: `activate_application(pid)` then `AXUIElement.raise()`
 
 ## Testing
 
-### Current Test Coverage (65 tests)
+### Current Test Coverage (63 tests)
 
 Run tests: `cargo test --all`
 
 **Tested modules:**
-- `core/tag.rs` - Tag bitmask operations (9 tests)
+- `core/tag.rs` - Tag bitmask operations (7 tests)
 - `macos/hotkey.rs` - `parse_hotkey()`, `format_hotkey()` (15 tests)
 - `yashiki-ipc` - Command/Response/LayoutMessage serialization (17 tests)
 - `core/state.rs` - State management with MockWindowSystem (13 tests)
@@ -300,7 +300,7 @@ pub trait WindowManipulator {
 ```
 
 - `MacOSWindowSystem` / `MacOSWindowManipulator` - Production implementations
-- `MockWindowSystem` / `MockWindowManipulator` - Test implementations (`#[cfg(test)]` only)
+- `MockWindowSystem` - Test implementation (`#[cfg(test)]` only)
 
 State methods take `WindowSystem` as parameter:
 - `state.sync_all(&window_system)`
@@ -356,20 +356,16 @@ fn handle_ipc_command<M: WindowManipulator>(...) -> Response {
 ```rust
 pub enum Effect {
     ApplyWindowMoves(Vec<WindowMove>),
-    ApplyLayout { display_id: DisplayId, frame: Rect, geometries: Vec<WindowGeometry> },
     FocusWindow { window_id: u32, pid: i32 },
     MoveWindowToPosition { window_id: u32, pid: i32, x: i32, y: i32 },
     Retile,
-    RetileDisplay(DisplayId),
     RetileDisplays(Vec<DisplayId>),
     SendLayoutCommand { cmd: String, args: Vec<String> },
     ExecCommand(String),
     FocusVisibleWindowIfNeeded,
-    UpdateWindowOrder { display_id: DisplayId, window_ids: Vec<u32> },
 }
 ```
 
 **Benefits:**
 - `process_command()` is a pure function, fully testable without macOS APIs
 - Effects can be inspected/verified in tests
-- `MockWindowManipulator` records all operations for test assertions

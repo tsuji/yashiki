@@ -1,15 +1,10 @@
-use crate::core::{Rect, WindowMove};
+use crate::core::WindowMove;
 use crate::macos::DisplayId;
-use yashiki_ipc::{Response, WindowGeometry};
+use yashiki_ipc::Response;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     ApplyWindowMoves(Vec<WindowMove>),
-    ApplyLayout {
-        display_id: DisplayId,
-        frame: Rect,
-        geometries: Vec<WindowGeometry>,
-    },
     FocusWindow {
         window_id: u32,
         pid: i32,
@@ -21,7 +16,6 @@ pub enum Effect {
         y: i32,
     },
     Retile,
-    RetileDisplay(DisplayId),
     RetileDisplays(Vec<DisplayId>),
     SendLayoutCommand {
         cmd: String,
@@ -29,10 +23,6 @@ pub enum Effect {
     },
     ExecCommand(String),
     FocusVisibleWindowIfNeeded,
-    UpdateWindowOrder {
-        display_id: DisplayId,
-        window_ids: Vec<u32>,
-    },
 }
 
 pub struct CommandResult {
