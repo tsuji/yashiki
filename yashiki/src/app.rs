@@ -345,6 +345,8 @@ fn handle_ipc_command(
             apply_window_moves(&moves);
             // Retile after moving window to tag
             do_retile(&state.borrow(), &mut layout_engine.borrow_mut());
+            // Focus a visible window since the moved window may now be hidden
+            focus_visible_window_if_needed(&state);
             Response::Ok
         }
         Command::ToggleWindowTag { tag } => {
@@ -352,6 +354,8 @@ fn handle_ipc_command(
             apply_window_moves(&moves);
             // Retile after toggling window tag
             do_retile(&state.borrow(), &mut layout_engine.borrow_mut());
+            // Focus a visible window if needed
+            focus_visible_window_if_needed(&state);
             Response::Ok
         }
         Command::LayoutCommand { cmd, args } => {
@@ -674,7 +678,7 @@ fn apply_window_moves(moves: &[WindowMove]) {
 
     for (pid, pid_moves) in by_pid {
         let app = AXUIElement::application(pid);
-        let windows = match app.windows() {
+        let ax_windows = match app.windows() {
             Ok(w) => w,
             Err(e) => {
                 tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
@@ -683,20 +687,39 @@ fn apply_window_moves(moves: &[WindowMove]) {
         };
 
         for m in pid_moves {
-            // Find the window to move - for now, just move first window of this app
-            // AeroSpace-style: only move position, don't resize
-            for win in &windows {
-                let pos = CGPoint::new(m.x as f64, m.y as f64);
-                if let Err(e) = win.set_position(pos) {
-                    tracing::warn!(
-                        "Failed to move window (pid={}, target=({}, {})): {}",
-                        m.pid,
-                        m.x,
-                        m.y,
-                        e
-                    );
-                } else {
-                    tracing::debug!("Moved window (pid={}) to ({}, {})", m.pid, m.x, m.y);
+            // Find matching AX window by current position
+            for ax_win in &ax_windows {
+                let pos = match ax_win.position() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                // Match by approximate position (old position)
+                let pos_match =
+                    (pos.x - m.old_x as f64).abs() < 10.0 && (pos.y - m.old_y as f64).abs() < 10.0;
+
+                if pos_match {
+                    let new_pos = CGPoint::new(m.new_x as f64, m.new_y as f64);
+                    if let Err(e) = ax_win.set_position(new_pos) {
+                        tracing::warn!(
+                            "Failed to move window (pid={}, from=({}, {}), to=({}, {})): {}",
+                            m.pid,
+                            m.old_x,
+                            m.old_y,
+                            m.new_x,
+                            m.new_y,
+                            e
+                        );
+                    } else {
+                        tracing::debug!(
+                            "Moved window (pid={}) from ({}, {}) to ({}, {})",
+                            m.pid,
+                            m.old_x,
+                            m.old_y,
+                            m.new_x,
+                            m.new_y
+                        );
+                    }
                     break;
                 }
             }

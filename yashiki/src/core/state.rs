@@ -8,8 +8,10 @@ use yashiki_ipc::{Direction, OutputDirection};
 pub struct WindowMove {
     pub window_id: WindowId,
     pub pid: i32,
-    pub x: i32,
-    pub y: i32,
+    pub old_x: i32,
+    pub old_y: i32,
+    pub new_x: i32,
+    pub new_y: i32,
 }
 
 pub struct State {
@@ -590,33 +592,42 @@ impl State {
 
             if should_be_visible && !is_visible {
                 if let Some(saved) = window.saved_frame.take() {
-                    tracing::debug!("Showing window {} at ({}, {})", window.id, saved.x, saved.y);
+                    tracing::debug!(
+                        "Showing window {} from ({}, {}) to ({}, {})",
+                        window.id,
+                        window.frame.x,
+                        window.frame.y,
+                        saved.x,
+                        saved.y
+                    );
                     moves.push(WindowMove {
                         window_id: window.id,
                         pid: window.pid,
-                        x: saved.x,
-                        y: saved.y,
+                        old_x: window.frame.x,
+                        old_y: window.frame.y,
+                        new_x: saved.x,
+                        new_y: saved.y,
                     });
                     window.frame = saved;
                 }
             } else if !should_be_visible && is_visible {
                 tracing::debug!(
-                    "Hiding window {} to ({}, {}) (was at ({}, {}))",
+                    "Hiding window {} from ({}, {}) to ({}, {})",
                     window.id,
-                    hide_x,
-                    hide_y,
                     window.frame.x,
-                    window.frame.y
+                    window.frame.y,
+                    hide_x,
+                    hide_y
                 );
-                window.saved_frame = Some(window.frame);
-                // Move window's top-left to screen's bottom-right corner
-                // Window keeps its size, entire window is off-screen
                 moves.push(WindowMove {
                     window_id: window.id,
                     pid: window.pid,
-                    x: hide_x,
-                    y: hide_y,
+                    old_x: window.frame.x,
+                    old_y: window.frame.y,
+                    new_x: hide_x,
+                    new_y: hide_y,
                 });
+                window.saved_frame = Some(window.frame);
                 window.frame.x = hide_x;
                 window.frame.y = hide_y;
             }
