@@ -136,7 +136,7 @@ yashiki layout-cmd set-smart-gaps off
 - **macos/display.rs** - CGWindowList window enumeration, display info
   - `get_on_screen_windows()`, `get_all_displays()` (uses NSScreen visibleFrame)
 - **macos/observer.rs** - AXObserver for window events
-- **macos/workspace.rs** - NSWorkspace app launch/terminate notifications, `activate_application()`
+- **macos/workspace.rs** - NSWorkspace app launch/terminate notifications, `activate_application()`, `get_frontmost_app_pid()`
 - **macos/hotkey.rs** - CGEventTap global hotkeys
   - `HotkeyManager` with dynamic bind/unbind
   - Tap recreation on binding changes
@@ -215,6 +215,12 @@ Implemented in core (layout-agnostic):
 - `left`/`right`/`up`/`down`: Geometry-based, finds nearest window using Manhattan distance
 
 Focus involves: `activate_application(pid)` then `AXUIElement.raise()`
+
+### Focus Tracking (Robust for Electron Apps)
+- `get_focused_window()` uses NSWorkspace.frontmostApplication as primary method
+- Falls back to accessibility API if NSWorkspace fails
+- Electron apps (e.g., Microsoft Teams) often fail with accessibility API (-25212 kAXErrorNoValue)
+- `sync_focused_window_with_hint(pid)` provides PID-based fallback for ApplicationActivated events
 
 ### Multi-monitor (river-style)
 - Each `Display` has its own `visible_tags`

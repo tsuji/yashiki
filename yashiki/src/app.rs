@@ -205,6 +205,10 @@ impl App {
                     WorkspaceEvent::AppTerminated { pid } => {
                         tracing::info!("App terminated, removing observer for pid {}", pid);
                         ctx.observer_manager.borrow_mut().remove_observer(pid);
+                        // Remove windows belonging to this PID from state
+                        if ctx.state.borrow_mut().sync_pid(pid) {
+                            do_retile(&ctx.state, &mut ctx.layout_engine.borrow_mut());
+                        }
                     }
                 }
             }
