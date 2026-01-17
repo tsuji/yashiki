@@ -1,8 +1,67 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use yashiki_ipc::layout::{LayoutMessage, LayoutResult, WindowGeometry};
+
+fn find_layout_engine(name: &str) -> Option<PathBuf> {
+    let command_name = format!("yashiki-layout-{}", name);
+
+    // 1. .app bundle (Contents/Resources/layouts/)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(macos_dir) = exe_path.parent() {
+            if let Some(contents_dir) = macos_dir.parent() {
+                let layout_path = contents_dir
+                    .join("Resources")
+                    .join("layouts")
+                    .join(&command_name);
+                if layout_path.exists() {
+                    tracing::debug!("Found layout engine in bundle: {:?}", layout_path);
+                    return Some(layout_path);
+                }
+            }
+        }
+    }
+
+    // 2. Same directory as executable (development)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let layout_path = exe_dir.join(&command_name);
+            if layout_path.exists() {
+                tracing::debug!("Found layout engine in exe dir: {:?}", layout_path);
+                return Some(layout_path);
+            }
+        }
+    }
+
+    // Not found in local paths
+    None
+}
+
+fn build_extended_path() -> String {
+    let mut paths: Vec<String> = Vec::new();
+
+    // Read from ~/.config/yashiki/path
+    if let Some(home) = dirs::home_dir() {
+        let path_file = home.join(".config").join("yashiki").join("path");
+        if let Ok(content) = std::fs::read_to_string(&path_file) {
+            for line in content.lines() {
+                let line = line.trim();
+                if !line.is_empty() && !line.starts_with('#') {
+                    paths.push(line.to_string());
+                }
+            }
+        }
+    }
+
+    // Append system PATH
+    if let Ok(system_path) = std::env::var("PATH") {
+        paths.push(system_path);
+    }
+
+    paths.join(":")
+}
 
 pub struct LayoutEngine {
     #[allow(dead_code)]
@@ -13,18 +72,30 @@ pub struct LayoutEngine {
 
 impl LayoutEngine {
     pub fn spawn(name: &str) -> Result<Self> {
-        let command = format!("yashiki-layout-{}", name);
-        let mut child = Command::new(&command)
+        let command_name = format!("yashiki-layout-{}", name);
+
+        let mut cmd = if let Some(path) = find_layout_engine(name) {
+            // Found in bundle or exe directory
+            Command::new(path)
+        } else {
+            // Search in extended PATH (includes ~/.config/yashiki/path entries)
+            let extended_path = build_extended_path();
+            let mut cmd = Command::new(&command_name);
+            cmd.env("PATH", extended_path);
+            cmd
+        };
+
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .with_context(|| format!("Failed to spawn layout engine: {}", command))?;
+            .with_context(|| format!("Failed to spawn layout engine: {}", command_name))?;
 
         let stdin = child.stdin.take().context("Failed to get stdin")?;
         let stdout = child.stdout.take().context("Failed to get stdout")?;
 
-        tracing::info!("Layout engine '{}' spawned", command);
+        tracing::info!("Layout engine '{}' spawned", command_name);
 
         Ok(Self {
             child,
