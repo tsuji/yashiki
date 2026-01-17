@@ -19,6 +19,11 @@ pub enum Command {
     LayoutCommand { cmd: String, args: Vec<String> },
     Retile,
 
+    // Keybinding operations
+    Bind { key: String, action: Box<Command> },
+    Unbind { key: String },
+    ListBindings,
+
     // Queries
     ListWindows,
     GetState,
@@ -45,6 +50,13 @@ pub enum Response {
     Error { message: String },
     Windows { windows: Vec<WindowInfo> },
     State { state: StateInfo },
+    Bindings { bindings: Vec<BindingInfo> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BindingInfo {
+    pub key: String,
+    pub action: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

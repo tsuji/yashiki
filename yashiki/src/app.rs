@@ -4,7 +4,8 @@ use crate::ipc::IpcServer;
 use crate::layout::LayoutEngine;
 use crate::macos;
 use crate::macos::{
-    get_main_display_size, AXUIElement, ObserverManager, WorkspaceEvent, WorkspaceWatcher,
+    get_main_display_size, AXUIElement, HotkeyManager, ObserverManager, WorkspaceEvent,
+    WorkspaceWatcher,
 };
 use anyhow::Result;
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
@@ -13,18 +14,20 @@ use objc2_foundation::MainThreadMarker;
 use std::cell::RefCell;
 use std::sync::mpsc as std_mpsc;
 use tokio::sync::mpsc;
-use yashiki_ipc::{Command, Response, StateInfo, WindowGeometry, WindowInfo};
+use yashiki_ipc::{BindingInfo, Command, Response, StateInfo, WindowGeometry, WindowInfo};
 
 type IpcCommandWithResponse = (Command, mpsc::Sender<Response>);
 
 struct RunLoopContext {
     ipc_cmd_rx: std_mpsc::Receiver<IpcCommandWithResponse>,
+    hotkey_cmd_rx: std_mpsc::Receiver<Command>,
     observer_event_rx: std_mpsc::Receiver<Event>,
     workspace_event_rx: std_mpsc::Receiver<WorkspaceEvent>,
     event_tx: mpsc::Sender<Event>,
     observer_manager: RefCell<ObserverManager>,
     state: RefCell<State>,
     layout_engine: RefCell<Option<LayoutEngine>>,
+    hotkey_manager: RefCell<HotkeyManager>,
 }
 
 pub struct App {}
@@ -131,15 +134,26 @@ impl App {
             }
         };
 
+        // Create hotkey manager
+        let (hotkey_cmd_tx, hotkey_cmd_rx) = std_mpsc::channel::<Command>();
+        let mut hotkey_manager = HotkeyManager::new(hotkey_cmd_tx);
+
+        // Start hotkey tap (initially with no bindings, will be updated via IPC)
+        if let Err(e) = hotkey_manager.start() {
+            tracing::warn!("Failed to start hotkey tap: {}", e);
+        }
+
         // Set up a timer to check for commands and events periodically
         let context = Box::new(RunLoopContext {
             ipc_cmd_rx,
+            hotkey_cmd_rx,
             observer_event_rx,
             workspace_event_rx,
             event_tx,
             observer_manager: RefCell::new(observer_manager),
             state: RefCell::new(state),
             layout_engine: RefCell::new(layout_engine),
+            hotkey_manager: RefCell::new(hotkey_manager),
         });
         let mut timer_context = core_foundation::runloop::CFRunLoopTimerContext {
             version: 0,
@@ -158,13 +172,21 @@ impl App {
             // Process IPC commands
             while let Ok((cmd, resp_tx)) = ctx.ipc_cmd_rx.try_recv() {
                 tracing::debug!("Received IPC command: {:?}", cmd);
-                let response = handle_ipc_command(&ctx.state, &ctx.layout_engine, &cmd);
+                let response =
+                    handle_ipc_command(&ctx.state, &ctx.layout_engine, &ctx.hotkey_manager, &cmd);
                 let _ = resp_tx.blocking_send(response);
 
                 // Handle Quit command after sending response
                 if matches!(cmd, Command::Quit) {
                     CFRunLoop::get_current().stop();
                 }
+            }
+
+            // Process hotkey commands (no response needed)
+            while let Ok(cmd) = ctx.hotkey_cmd_rx.try_recv() {
+                tracing::debug!("Received hotkey command: {:?}", cmd);
+                let _ =
+                    handle_ipc_command(&ctx.state, &ctx.layout_engine, &ctx.hotkey_manager, &cmd);
             }
 
             // Process workspace events (app launch/terminate)
@@ -206,15 +228,58 @@ impl App {
         let run_loop = CFRunLoop::get_current();
         run_loop.add_timer(&timer, unsafe { kCFRunLoopDefaultMode });
 
+        // Run init script in background thread
+        std::thread::spawn(|| {
+            run_init_script();
+        });
+
         tracing::info!("Entering CFRunLoop");
         CFRunLoop::run_current();
         tracing::info!("CFRunLoop exited");
     }
 }
 
+fn run_init_script() {
+    let config_dir = match dirs::config_dir() {
+        Some(dir) => dir.join("yashiki"),
+        None => {
+            tracing::warn!("Could not determine config directory");
+            return;
+        }
+    };
+
+    let init_script = config_dir.join("init");
+    if !init_script.exists() {
+        tracing::debug!("No init script found at {:?}", init_script);
+        return;
+    }
+
+    tracing::info!("Running init script: {:?}", init_script);
+
+    // Small delay to ensure IPC server is ready
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    match std::process::Command::new(&init_script)
+        .current_dir(&config_dir)
+        .status()
+    {
+        Ok(status) => {
+            if status.success() {
+                tracing::info!("Init script completed successfully");
+            } else {
+                tracing::warn!("Init script exited with status: {}", status);
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to run init script: {}", e);
+        }
+    }
+}
+
 fn handle_ipc_command(
     state: &RefCell<State>,
     layout_engine: &RefCell<Option<LayoutEngine>>,
+    hotkey_manager: &RefCell<HotkeyManager>,
     cmd: &Command,
 ) -> Response {
     match cmd {
@@ -315,6 +380,32 @@ fn handle_ipc_command(
                     message: "No layout engine available".to_string(),
                 }
             }
+        }
+        Command::Bind { key, action } => {
+            let mut manager = hotkey_manager.borrow_mut();
+            match manager.bind(key, *action.clone()) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e },
+            }
+        }
+        Command::Unbind { key } => {
+            let mut manager = hotkey_manager.borrow_mut();
+            match manager.unbind(key) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e },
+            }
+        }
+        Command::ListBindings => {
+            let manager = hotkey_manager.borrow();
+            let bindings: Vec<BindingInfo> = manager
+                .list_bindings()
+                .into_iter()
+                .map(|(key, cmd)| BindingInfo {
+                    key,
+                    action: format!("{:?}", cmd),
+                })
+                .collect();
+            Response::Bindings { bindings }
         }
         Command::Quit => {
             tracing::info!("Quit command received");

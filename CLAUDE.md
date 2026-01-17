@@ -5,7 +5,7 @@ macOS tiling window manager written in Rust.
 ## Project Structure
 
 ```
-yashiki/          # WM core daemon
+yashiki/          # WM core daemon + CLI
 yashiki-ipc/      # Shared protocol definitions (commands, layout)
 tatami/           # Default tile layout engine (master-stack)
 ```
@@ -24,13 +24,13 @@ Future components:
   - Window operations
 - **Tokio runtime** (separate thread):
   - IPC server (Unix Domain Socket)
-  - Config file watching
-  - State management, layout calculation
+  - Event forwarding
 
 ### Communication
 
-- macOS → tokio: `tokio::sync::mpsc`
-- tokio → macOS: `dispatch::Queue::main().exec_async()`
+- IPC commands: tokio → main thread via `std::sync::mpsc`
+- Hotkey commands: CGEventTap callback → main thread via `std::sync::mpsc`
+- Layout engine: stdin/stdout JSON (synchronous, from main thread)
 
 ### Virtual Workspaces (No SIP Required)
 
@@ -47,78 +47,112 @@ Like AeroSpace, uses virtual workspaces instead of macOS native Spaces:
 - **External layout engine** (like river)
   - Layout engine is a separate process
   - Communicates via stdin/stdout JSON
+  - Layout engine manages its own state (main_count, main_ratio)
   - Users can write custom layout engines
+- **River-style configuration**
+  - Config is a shell script (`~/.config/yashiki/init`)
+  - Uses CLI commands for configuration
+  - Dynamic binding changes supported
 
 ## Layout Protocol
 
 ```rust
-// yashiki → layout engine
-LayoutRequest { output_width, output_height, window_count, main_count, main_ratio }
+// yashiki → layout engine (yashiki-ipc/src/layout.rs)
+enum LayoutMessage {
+    Layout { width: u32, height: u32, windows: Vec<u32> },  // window IDs
+    Command { cmd: String, args: Vec<String> },
+}
 
 // layout engine → yashiki
-LayoutResponse { windows: Vec<WindowGeometry> }
+enum LayoutResult {
+    Layout { windows: Vec<WindowGeometry> },  // id, x, y, width, height
+    Ok,
+    Error { message: String },
+}
+```
+
+## CLI Usage
+
+```sh
+yashiki                           # Run daemon
+yashiki bind alt-1 view-tag 1     # Bind hotkey
+yashiki unbind alt-1              # Unbind hotkey
+yashiki list-bindings             # List all bindings
+yashiki view-tag 1                # Switch to tag 1
+yashiki toggle-view-tag 2         # Toggle tag 2 visibility
+yashiki move-to-tag 1             # Move focused window to tag 1
+yashiki retile                    # Apply layout
+yashiki layout-cmd set-main-ratio 0.6   # Send command to layout engine
+yashiki layout-cmd inc-main-count       # Increase main window count
+yashiki list-windows              # List all windows
+yashiki get-state                 # Get current state
+yashiki quit                      # Quit daemon
+```
+
+## Config Example
+
+```sh
+# ~/.config/yashiki/init
+#!/bin/sh
+yashiki bind alt-1 view-tag 1
+yashiki bind alt-2 view-tag 2
+yashiki bind alt-shift-1 move-to-tag 1
+yashiki bind alt-shift-2 move-to-tag 2
+yashiki bind alt-return retile
+yashiki bind alt-comma layout-cmd inc-main-count
+yashiki bind alt-period layout-cmd dec-main-count
+yashiki bind alt-h layout-cmd set-main-ratio 0.5
 ```
 
 ## Implementation Status
 
 ### Completed
-- `macos/accessibility.rs` - AXUIElement FFI bindings
-  - `is_trusted()`, `is_trusted_with_prompt()` - permission check
-  - `AXUIElement::application(pid)`, `windows()`, `title()`, `position()`, `size()`
-  - `set_position()`, `set_size()` - window manipulation
-- `macos/display.rs` - CGWindowList based window enumeration
-  - `get_on_screen_windows()` - list on-screen windows
-  - `get_running_app_pids()` - get PIDs of apps with windows
-- `macos/observer.rs` - AXObserver for window events
-  - `ObserverManager` - manages per-app observers
-  - Monitors: window created/destroyed, moved, resized, focused, miniaturized
-- `macos/workspace.rs` - NSWorkspace notifications
-  - `WorkspaceWatcher` - app launch/terminate events
-- `app.rs` - Main event loop
-  - CFRunLoop + tokio runtime integration
-  - Timer-based event polling (50ms)
-  - Command/Event channel setup
-- `core/state.rs` - Window state management
-  - `State::sync_all()` - initial window sync from CGWindowList
-  - `State::sync_pid()` - per-process window sync
-  - `State::handle_event()` - event-driven state updates
-- `core/window.rs` - Window representation
-  - `Window` struct with id, pid, tags, title, app_name, frame, is_minimized
-  - `Window::from_window_info()` - conversion from CGWindowList data
-- `core/tag.rs` - Tag bitmask for workspace management
-- `event.rs` - Event/Command definitions
+- **macos/accessibility.rs** - AXUIElement FFI bindings
+  - Permission check, window manipulation (position, size)
+- **macos/display.rs** - CGWindowList window enumeration
+  - `get_on_screen_windows()`, `get_main_display_size()`
+- **macos/observer.rs** - AXObserver for window events
+- **macos/workspace.rs** - NSWorkspace app launch/terminate notifications
+- **macos/hotkey.rs** - CGEventTap global hotkeys
+  - `HotkeyManager` with dynamic bind/unbind
+  - Tap recreation on binding changes
+- **core/state.rs** - Window state management
+  - Tag operations: `view_tag()`, `toggle_view_tag()`, `move_focused_to_tag()`, `toggle_focused_window_tag()`
+- **core/window.rs** - Window struct with tags, saved_frame for off-screen
+- **core/tag.rs** - Tag bitmask
+- **ipc/server.rs** - IPC server on `/tmp/yashiki.sock`
+- **ipc/client.rs** - IPC client for CLI
+- **layout.rs** - `LayoutEngine` for spawning and communicating with tatami
+- **app.rs** - Main event loop with CFRunLoop timer
+  - Processes: IPC commands, hotkey commands, workspace events, observer events
+  - Runs init script at startup
+- **main.rs** - Daemon + CLI mode
+- **yashiki-ipc/** - Command/Response/LayoutMessage enums
 
-- `ipc.rs` - IPC server (Unix Domain Socket)
-  - `IpcServer` - listens on `/tmp/yashiki.sock`
-  - JSON protocol (newline-delimited)
-  - Supported commands: `ListWindows`, `GetState`, `ViewTag`, `ToggleViewTag`, `MoveToTag`, `ToggleWindowTag`, `Quit`
-- `yashiki-ipc/` - Shared protocol definitions
-  - `Command` enum - IPC commands
-  - `Response` enum - IPC responses
-  - `WindowInfo`, `StateInfo` - query response types
-- Tag/workspace switching
-  - AeroSpace-style virtual workspaces (windows moved off-screen at x=-10000)
-  - `State::view_tag()`, `toggle_view_tag()`, `move_focused_to_tag()`, `toggle_focused_window_tag()`
-  - `Window::saved_frame` - stores original position when hidden
+### tatami (layout engine)
+- Master-stack layout
+- Internal state: main_count, main_ratio
+- Commands: `set-main-ratio`, `inc-main-count`, `dec-main-count`, `set-main-count`
 
 ### Not Yet Implemented
-- Layout engine communication
-- Config file parsing
-- Global hotkeys (CGEventTap)
+- `FocusWindow` / `SwapWindow` commands (direction-based focus)
+- Auto-retile on window add/remove
+- `CloseWindow` / `ToggleFloat`
 
 ## Development Notes
 
 - Requires Accessibility permission (System Preferences → Privacy & Security → Accessibility)
 - During development, grant permission to the terminal (e.g., Ghostty)
-- Run with: `cargo run -p yashiki`
+- Run daemon: `RUST_LOG=info cargo run -p yashiki`
+- Run CLI: `cargo run -p yashiki -- list-windows`
 
 ## Dependencies
 
 Key crates:
 - `core-foundation` (0.10) - macOS Core Foundation bindings
-- `core-graphics` (0.25) - CGWindowList, display info
-- `tokio` - async runtime for IPC
-- `dispatch` - GCD for main thread communication
+- `core-graphics` (0.25) - CGWindowList, CGEventTap, display info
+- `tokio` - async runtime for IPC server
+- `dirs` - config directory location
 
 ## Code Style
 
@@ -126,9 +160,25 @@ Key crates:
 - Minimal comments - only where logic is non-obvious
 - No unnecessary comments explaining what the next line does
 - When adding dependencies, always use the latest version
+- Prefer Actor model - keep data operations within single thread, avoid Mutex
 
 ## Workflow
 
 - When user asks to plan something, present the plan first and wait for approval before implementing
 - Do not start implementation until user confirms the plan
 - Run `cargo fmt --all` at the end of each task
+
+## Design Decisions
+
+### Hotkey Dynamic Update
+- Bindings stored in `HashMap<Hotkey, Command>` on main thread
+- When `bind`/`unbind` called, CGEventTap is recreated with new bindings clone
+- No Mutex needed - tap callback gets owned clone of bindings
+
+### Focus Direction (TODO)
+Options discussed:
+1. Geometry-based: Find nearest window in direction (layout-agnostic)
+2. Stack-based: next/prev based on window list order (simple)
+3. Layout-aware: Ask layout engine (complex)
+
+Recommended: Stack-based for next/prev, geometry-based for directions.
