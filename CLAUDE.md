@@ -184,7 +184,6 @@ yashiki bind alt-shift-o output-send next
 # Gap configuration (sent to currently active layout engine)
 yashiki layout-cmd set-inner-gap 10
 yashiki layout-cmd set-outer-gap 10
-yashiki layout-cmd set-smart-gaps off
 
 # App launchers
 yashiki bind alt-return exec "open -n /Applications/Ghostty.app"
@@ -235,15 +234,15 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 
 ### yashiki-layout-tatami (layout engine)
 - Master-stack layout
-- Internal state: main_count, main_ratio, inner_gap, outer_gap, smart_gaps, focused_window_id, main_window_id
+- Internal state: main_count, main_ratio, inner_gap, outer_gap, focused_window_id, main_window_id
 - Commands:
   - `focus-changed <window_id>` - notification from yashiki (returns `Ok`)
   - `zoom [window_id]` - set main window (uses focused window if id omitted)
   - `set-main-ratio <0.1-0.9>`, `inc-main-ratio [delta]`, `dec-main-ratio [delta]` (default delta: 0.05)
   - `inc-main-count`, `dec-main-count`, `set-main-count <n>`
-  - `set-inner-gap <px>`, `set-outer-gap <px>` - gap between windows / screen edges
+  - `set-inner-gap <px>` - gap between windows
+  - `set-outer-gap <all> | <v h> | <t r b l>` - gap from screen edges (CSS-style: 1/2/4 values)
   - `inc-inner-gap [delta]`, `dec-inner-gap [delta]`, `inc-outer-gap [delta]`, `dec-outer-gap [delta]`
-  - `set-smart-gaps <on|off>` - disable gaps when only one window (default: on)
 
 ### yashiki-layout-byobu (layout engine)
 - Accordion layout (AeroSpace-style)

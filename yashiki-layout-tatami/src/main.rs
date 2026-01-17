@@ -2,12 +2,77 @@ use anyhow::Result;
 use std::io::{self, BufRead, Write};
 use yashiki_ipc::layout::{LayoutMessage, LayoutResult, WindowGeometry};
 
+#[derive(Clone, Copy, Default)]
+struct OuterGap {
+    top: u32,
+    right: u32,
+    bottom: u32,
+    left: u32,
+}
+
+impl OuterGap {
+    fn all(value: u32) -> Self {
+        Self {
+            top: value,
+            right: value,
+            bottom: value,
+            left: value,
+        }
+    }
+
+    fn vertical_horizontal(vertical: u32, horizontal: u32) -> Self {
+        Self {
+            top: vertical,
+            right: horizontal,
+            bottom: vertical,
+            left: horizontal,
+        }
+    }
+
+    fn from_args(args: &[String]) -> Option<Self> {
+        match args.len() {
+            1 => args[0].parse().ok().map(Self::all),
+            2 => {
+                let v = args[0].parse().ok()?;
+                let h = args[1].parse().ok()?;
+                Some(Self::vertical_horizontal(v, h))
+            }
+            4 => {
+                let top = args[0].parse().ok()?;
+                let right = args[1].parse().ok()?;
+                let bottom = args[2].parse().ok()?;
+                let left = args[3].parse().ok()?;
+                Some(Self {
+                    top,
+                    right,
+                    bottom,
+                    left,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn add_all(&mut self, delta: u32) {
+        self.top = self.top.saturating_add(delta);
+        self.right = self.right.saturating_add(delta);
+        self.bottom = self.bottom.saturating_add(delta);
+        self.left = self.left.saturating_add(delta);
+    }
+
+    fn sub_all(&mut self, delta: u32) {
+        self.top = self.top.saturating_sub(delta);
+        self.right = self.right.saturating_sub(delta);
+        self.bottom = self.bottom.saturating_sub(delta);
+        self.left = self.left.saturating_sub(delta);
+    }
+}
+
 struct LayoutState {
     main_count: u32,
     main_ratio: f64,
     inner_gap: u32,
-    outer_gap: u32,
-    smart_gaps: bool,
+    outer_gap: OuterGap,
     main_window_id: Option<u32>,
     focused_window_id: Option<u32>,
 }
@@ -18,8 +83,7 @@ impl Default for LayoutState {
             main_count: 1,
             main_ratio: 0.5,
             inner_gap: 0,
-            outer_gap: 0,
-            smart_gaps: true,
+            outer_gap: OuterGap::default(),
             main_window_id: None,
             focused_window_id: None,
         }
@@ -119,12 +183,12 @@ fn handle_command(state: &mut LayoutState, cmd: &str, args: &[String]) -> Layout
             }
         }
         "set-outer-gap" => {
-            if let Some(gap) = args.first().and_then(|s| s.parse::<u32>().ok()) {
+            if let Some(gap) = OuterGap::from_args(args) {
                 state.outer_gap = gap;
                 return LayoutResult::Ok;
             }
             LayoutResult::Error {
-                message: "invalid gap value".to_string(),
+                message: "usage: set-outer-gap <all> | <v h> | <t r b l>".to_string(),
             }
         }
         "inc-inner-gap" => {
@@ -148,7 +212,7 @@ fn handle_command(state: &mut LayoutState, cmd: &str, args: &[String]) -> Layout
                 .first()
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(1);
-            state.outer_gap = state.outer_gap.saturating_add(delta);
+            state.outer_gap.add_all(delta);
             LayoutResult::Ok
         }
         "dec-outer-gap" => {
@@ -156,26 +220,8 @@ fn handle_command(state: &mut LayoutState, cmd: &str, args: &[String]) -> Layout
                 .first()
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(1);
-            state.outer_gap = state.outer_gap.saturating_sub(delta);
+            state.outer_gap.sub_all(delta);
             LayoutResult::Ok
-        }
-        "set-smart-gaps" => {
-            if let Some(val) = args.first() {
-                match val.as_str() {
-                    "on" | "true" | "1" => {
-                        state.smart_gaps = true;
-                        return LayoutResult::Ok;
-                    }
-                    "off" | "false" | "0" => {
-                        state.smart_gaps = false;
-                        return LayoutResult::Ok;
-                    }
-                    _ => {}
-                }
-            }
-            LayoutResult::Error {
-                message: "invalid value (use on/off)".to_string(),
-            }
         }
         "focus-changed" => {
             if let Some(id) = args.first().and_then(|s| s.parse::<u32>().ok()) {
@@ -232,17 +278,12 @@ fn generate_layout(
     };
 
     let window_count = window_ids.len() as u32;
-
-    // Smart gaps: disable gaps when only one window
-    let (outer_gap, inner_gap) = if state.smart_gaps && window_count == 1 {
-        (0, 0)
-    } else {
-        (state.outer_gap, state.inner_gap)
-    };
+    let outer_gap = state.outer_gap;
+    let inner_gap = state.inner_gap;
 
     // Calculate usable area after outer gaps
-    let usable_width = width.saturating_sub(outer_gap * 2);
-    let usable_height = height.saturating_sub(outer_gap * 2);
+    let usable_width = width.saturating_sub(outer_gap.left + outer_gap.right);
+    let usable_height = height.saturating_sub(outer_gap.top + outer_gap.bottom);
 
     let main_count = state.main_count.min(window_count);
     let stack_count = window_count - main_count;
@@ -267,16 +308,16 @@ fn generate_layout(
     let main_window_height = usable_height.saturating_sub(main_total_gaps) / main_count.max(1);
 
     for i in 0..main_count as usize {
-        let y = outer_gap + (i as u32 * (main_window_height + inner_gap));
+        let y = outer_gap.top + (i as u32 * (main_window_height + inner_gap));
         // Last window in main fills remaining space to handle rounding
         let h = if i == main_count as usize - 1 {
-            (outer_gap + usable_height).saturating_sub(y)
+            (outer_gap.top + usable_height).saturating_sub(y)
         } else {
             main_window_height
         };
         windows.push(WindowGeometry {
             id: window_ids[i],
-            x: outer_gap as i32,
+            x: outer_gap.left as i32,
             y: y as i32,
             width: main_width,
             height: h,
@@ -287,14 +328,14 @@ fn generate_layout(
     if stack_count > 0 {
         let stack_total_gaps = inner_gap.saturating_mul(stack_count.saturating_sub(1));
         let stack_window_height = usable_height.saturating_sub(stack_total_gaps) / stack_count;
-        let stack_x = outer_gap + main_width + inner_gap;
+        let stack_x = outer_gap.left + main_width + inner_gap;
 
         for i in 0..stack_count as usize {
             let idx = main_count as usize + i;
-            let y = outer_gap + (i as u32 * (stack_window_height + inner_gap));
+            let y = outer_gap.top + (i as u32 * (stack_window_height + inner_gap));
             // Last window fills remaining space to handle rounding
             let h = if i == stack_count as usize - 1 {
-                (outer_gap + usable_height).saturating_sub(y)
+                (outer_gap.top + usable_height).saturating_sub(y)
             } else {
                 stack_window_height
             };
