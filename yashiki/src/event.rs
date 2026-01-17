@@ -1,5 +1,3 @@
-use core_graphics::geometry::{CGPoint, CGSize};
-
 #[derive(Debug, Clone)]
 pub enum Event {
     WindowCreated { pid: i32 },
@@ -13,12 +11,4 @@ pub enum Event {
     ApplicationDeactivated { pid: i32 },
     ApplicationHidden { pid: i32 },
     ApplicationShown { pid: i32 },
-}
-
-#[derive(Debug)]
-pub enum Command {
-    MoveWindow { pid: i32, position: CGPoint },
-    ResizeWindow { pid: i32, size: CGSize },
-    MoveFocusedWindow { position: CGPoint },
-    Quit,
 }

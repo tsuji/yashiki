@@ -88,8 +88,16 @@ LayoutResponse { windows: Vec<WindowGeometry> }
 - `core/tag.rs` - Tag bitmask for workspace management
 - `event.rs` - Event/Command definitions
 
+- `ipc.rs` - IPC server (Unix Domain Socket)
+  - `IpcServer` - listens on `/tmp/yashiki.sock`
+  - JSON protocol (newline-delimited)
+  - Supported commands: `ListWindows`, `GetState`, `Quit`
+- `yashiki-ipc/` - Shared protocol definitions
+  - `Command` enum - IPC commands
+  - `Response` enum - IPC responses
+  - `WindowInfo`, `StateInfo` - query response types
+
 ### Not Yet Implemented
-- IPC server (Unix Domain Socket)
 - Tag/workspace switching logic
 - Layout engine communication
 - Config file parsing

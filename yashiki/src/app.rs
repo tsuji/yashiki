@@ -1,5 +1,6 @@
 use crate::core::State;
-use crate::event::{Command, Event};
+use crate::event::Event;
+use crate::ipc::IpcServer;
 use crate::macos;
 use crate::macos::{ObserverManager, WorkspaceEvent, WorkspaceWatcher};
 use anyhow::Result;
@@ -8,9 +9,12 @@ use objc2_foundation::MainThreadMarker;
 use std::cell::RefCell;
 use std::sync::mpsc as std_mpsc;
 use tokio::sync::mpsc;
+use yashiki_ipc::{Command, Response, StateInfo, WindowInfo};
+
+type IpcCommandWithResponse = (Command, mpsc::Sender<Response>);
 
 struct RunLoopContext {
-    cmd_rx: std_mpsc::Receiver<Command>,
+    ipc_cmd_rx: std_mpsc::Receiver<IpcCommandWithResponse>,
     observer_event_rx: std_mpsc::Receiver<Event>,
     workspace_event_rx: std_mpsc::Receiver<WorkspaceEvent>,
     event_tx: mpsc::Sender<Event>,
@@ -28,8 +32,8 @@ impl App {
             anyhow::bail!("Please grant Accessibility permission and restart");
         }
 
-        // Channel: tokio -> main thread (via dispatch)
-        let (cmd_tx, cmd_rx) = std_mpsc::channel::<Command>();
+        // Channel: IPC commands (tokio -> main thread)
+        let (ipc_cmd_tx, ipc_cmd_rx) = std_mpsc::channel::<IpcCommandWithResponse>();
 
         // Channel: observer -> main thread
         let (observer_event_tx, observer_event_rx) = std_mpsc::channel::<Event>();
@@ -37,26 +41,53 @@ impl App {
         // Channel: main thread -> tokio
         let (event_tx, event_rx) = mpsc::channel::<Event>(256);
 
+        // Channel for IPC server (tokio internal)
+        let (ipc_tx, ipc_rx) = mpsc::channel::<IpcCommandWithResponse>(256);
+
         // Spawn tokio runtime in separate thread
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async move {
-                Self::run_async(cmd_tx, event_rx).await;
+                Self::run_async(ipc_cmd_tx, ipc_tx, ipc_rx, event_rx).await;
             });
         });
 
         let app = App {};
-        app.run_main_loop(cmd_rx, observer_event_tx, observer_event_rx, event_tx);
+        app.run_main_loop(ipc_cmd_rx, observer_event_tx, observer_event_rx, event_tx);
 
         Ok(())
     }
 
-    async fn run_async(_cmd_tx: std_mpsc::Sender<Command>, mut event_rx: mpsc::Receiver<Event>) {
+    async fn run_async(
+        ipc_cmd_tx: std_mpsc::Sender<IpcCommandWithResponse>,
+        ipc_server_tx: mpsc::Sender<IpcCommandWithResponse>,
+        mut ipc_rx: mpsc::Receiver<IpcCommandWithResponse>,
+        mut event_rx: mpsc::Receiver<Event>,
+    ) {
         tracing::info!("Tokio runtime started");
 
-        // Process events from main thread
-        while let Some(event) = event_rx.recv().await {
-            tracing::info!("Received event: {:?}", event);
+        // Start IPC server
+        let ipc_server = IpcServer::new(ipc_server_tx);
+        tokio::spawn(async move {
+            if let Err(e) = ipc_server.run().await {
+                tracing::error!("IPC server error: {}", e);
+            }
+        });
+
+        loop {
+            tokio::select! {
+                Some((cmd, resp_tx)) = ipc_rx.recv() => {
+                    // Forward IPC commands to main thread
+                    if ipc_cmd_tx.send((cmd, resp_tx)).is_err() {
+                        tracing::error!("Failed to forward IPC command to main thread");
+                        break;
+                    }
+                }
+                Some(event) = event_rx.recv() => {
+                    tracing::debug!("Received event: {:?}", event);
+                }
+                else => break,
+            }
         }
 
         tracing::info!("Tokio runtime exiting");
@@ -64,7 +95,7 @@ impl App {
 
     fn run_main_loop(
         self,
-        cmd_rx: std_mpsc::Receiver<Command>,
+        ipc_cmd_rx: std_mpsc::Receiver<IpcCommandWithResponse>,
         observer_event_tx: std_mpsc::Sender<Event>,
         observer_event_rx: std_mpsc::Receiver<Event>,
         event_tx: mpsc::Sender<Event>,
@@ -88,7 +119,7 @@ impl App {
 
         // Set up a timer to check for commands and events periodically
         let context = Box::new(RunLoopContext {
-            cmd_rx,
+            ipc_cmd_rx,
             observer_event_rx,
             workspace_event_rx,
             event_tx,
@@ -109,31 +140,15 @@ impl App {
         ) {
             let ctx = unsafe { &*(info as *const RunLoopContext) };
 
-            // Process commands from tokio
-            while let Ok(cmd) = ctx.cmd_rx.try_recv() {
-                tracing::debug!("Received command: {:?}", cmd);
-                match cmd {
-                    Command::MoveFocusedWindow { position } => match macos::get_focused_window() {
-                        Ok(win) => {
-                            let title = win.title().unwrap_or_default();
-                            tracing::info!(
-                                "Moving window {:?} to ({}, {})",
-                                title,
-                                position.x,
-                                position.y
-                            );
-                            if let Err(e) = win.set_position(position) {
-                                tracing::error!("Failed to move window: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to get focused window: {}", e);
-                        }
-                    },
-                    Command::Quit => {
-                        CFRunLoop::get_current().stop();
-                    }
-                    _ => {}
+            // Process IPC commands
+            while let Ok((cmd, resp_tx)) = ctx.ipc_cmd_rx.try_recv() {
+                tracing::debug!("Received IPC command: {:?}", cmd);
+                let response = handle_ipc_command(&ctx.state, &cmd);
+                let _ = resp_tx.blocking_send(response);
+
+                // Handle Quit command after sending response
+                if matches!(cmd, Command::Quit) {
+                    CFRunLoop::get_current().stop();
                 }
             }
 
@@ -179,5 +194,50 @@ impl App {
         tracing::info!("Entering CFRunLoop");
         CFRunLoop::run_current();
         tracing::info!("CFRunLoop exited");
+    }
+}
+
+fn handle_ipc_command(state: &RefCell<State>, cmd: &Command) -> Response {
+    match cmd {
+        Command::ListWindows => {
+            let state = state.borrow();
+            let windows: Vec<WindowInfo> = state
+                .windows
+                .values()
+                .map(|w| WindowInfo {
+                    id: w.id,
+                    pid: w.pid,
+                    title: w.title.clone(),
+                    app_name: w.app_name.clone(),
+                    tags: w.tags.mask(),
+                    x: w.frame.x,
+                    y: w.frame.y,
+                    width: w.frame.width,
+                    height: w.frame.height,
+                    is_focused: state.focused == Some(w.id),
+                })
+                .collect();
+            Response::Windows { windows }
+        }
+        Command::GetState => {
+            let state = state.borrow();
+            Response::State {
+                state: StateInfo {
+                    visible_tags: state.visible_tags.mask(),
+                    focused_window_id: state.focused,
+                    window_count: state.windows.len(),
+                },
+            }
+        }
+        Command::Quit => {
+            tracing::info!("Quit command received");
+            Response::Ok
+        }
+        _ => {
+            tracing::warn!("Unhandled command: {:?}", cmd);
+            Response::Error {
+                message: "Command not yet implemented".to_string(),
+            }
+        }
     }
 }

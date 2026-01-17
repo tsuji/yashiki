@@ -1,6 +1,6 @@
 use super::{Tag, Window, WindowId};
 use crate::event::Event;
-use crate::macos::{get_on_screen_windows, WindowInfo};
+use crate::macos::{get_focused_window, get_on_screen_windows, WindowInfo};
 use std::collections::{HashMap, HashSet};
 
 pub struct State {
@@ -29,10 +29,56 @@ impl State {
     pub fn sync_all(&mut self) {
         let window_infos = get_on_screen_windows();
         self.sync_with_window_infos(&window_infos);
+        self.sync_focused_window();
         tracing::info!("State initialized with {} windows", self.windows.len());
         for window in self.windows.values() {
             tracing::debug!("  - [{}] {} ({})", window.id, window.title, window.app_name);
         }
+    }
+
+    pub fn sync_focused_window(&mut self) {
+        let focused_window = match get_focused_window() {
+            Ok(win) => win,
+            Err(_) => {
+                self.set_focused(None);
+                return;
+            }
+        };
+
+        let pid = match focused_window.pid() {
+            Ok(pid) => pid,
+            Err(_) => {
+                self.set_focused(None);
+                return;
+            }
+        };
+
+        let position = focused_window.position().ok();
+        let size = focused_window.size().ok();
+
+        // Find matching window by PID and bounds
+        let window_id = self
+            .windows
+            .values()
+            .find(|w| {
+                if w.pid != pid {
+                    return false;
+                }
+                // If we have position/size, use them for more precise matching
+                if let (Some(pos), Some(sz)) = (&position, &size) {
+                    let x_match = (w.frame.x - pos.x as i32).abs() <= 1;
+                    let y_match = (w.frame.y - pos.y as i32).abs() <= 1;
+                    let w_match = (w.frame.width as i32 - sz.width as i32).abs() <= 1;
+                    let h_match = (w.frame.height as i32 - sz.height as i32).abs() <= 1;
+                    x_match && y_match && w_match && h_match
+                } else {
+                    // Fallback: just use PID (first window of that app)
+                    true
+                }
+            })
+            .map(|w| w.id);
+
+        self.set_focused(window_id);
     }
 
     pub fn sync_pid(&mut self, pid: i32) {
@@ -111,12 +157,8 @@ impl State {
             | Event::WindowDeminiaturized { pid } => {
                 self.sync_pid(*pid);
             }
-            Event::FocusedWindowChanged { pid } => {
-                self.sync_pid(*pid);
-                self.update_focused_from_pid(*pid);
-            }
-            Event::ApplicationActivated { pid } => {
-                self.update_focused_from_pid(*pid);
+            Event::FocusedWindowChanged { .. } | Event::ApplicationActivated { .. } => {
+                self.sync_focused_window();
             }
             Event::ApplicationDeactivated { .. }
             | Event::ApplicationHidden { .. }
@@ -129,11 +171,6 @@ impl State {
             tracing::info!("Focus changed: {:?} -> {:?}", self.focused, window_id);
             self.focused = window_id;
         }
-    }
-
-    fn update_focused_from_pid(&mut self, pid: i32) {
-        let window_id = self.windows.values().find(|w| w.pid == pid).map(|w| w.id);
-        self.set_focused(window_id);
     }
 
     fn sync_with_window_infos(&mut self, window_infos: &[WindowInfo]) {

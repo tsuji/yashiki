@@ -1,6 +1,7 @@
 mod app;
 mod core;
 mod event;
+mod ipc;
 mod macos;
 
 use anyhow::Result;
