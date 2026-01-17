@@ -455,135 +455,107 @@ fn parse_command(args: &[String]) -> Result<Command> {
         bail!("No command provided");
     }
 
-    let cmd = args[0].as_str();
-    let rest = &args[1..];
+    let cmd_name = &args[0];
+    let cmd_args: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
 
-    match cmd {
+    fn from_argh<T: argh::FromArgs>(name: &str, args: &[&str]) -> Result<T> {
+        T::from_args(&[name], args).map_err(|e| anyhow::anyhow!("{}", e.output))
+    }
+
+    match cmd_name.as_str() {
         "bind" => {
-            if rest.len() < 2 {
-                bail!("Usage: bind <key> <command> [args...]");
+            let cmd: BindCmd = from_argh(cmd_name, &cmd_args)?;
+            if cmd.action.is_empty() {
+                bail!("bind requires a command to bind");
             }
-            let key = rest[0].clone();
-            let action = parse_command(&rest[1..].to_vec())?;
+            let action = parse_command(&cmd.action)?;
             Ok(Command::Bind {
-                key,
+                key: cmd.key,
                 action: Box::new(action),
             })
         }
         "unbind" => {
-            if rest.is_empty() {
-                bail!("Usage: unbind <key>");
-            }
-            Ok(Command::Unbind {
-                key: rest[0].clone(),
-            })
+            let cmd: UnbindCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::Unbind { key: cmd.key })
         }
         "list-bindings" => Ok(Command::ListBindings),
         "tag-view" => {
-            let (output, rest) = parse_output_option(rest);
-            if rest.is_empty() {
-                bail!("Usage: tag-view [--output <id|name>] <tags>");
-            }
-            let tags: u32 = rest[0].parse()?;
-            Ok(Command::TagView { tags, output })
+            let cmd: TagViewCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::TagView {
+                tags: cmd.tags,
+                output: parse_output_specifier(cmd.output),
+            })
         }
         "tag-toggle" => {
-            let (output, rest) = parse_output_option(rest);
-            if rest.is_empty() {
-                bail!("Usage: tag-toggle [--output <id|name>] <tags>");
-            }
-            let tags: u32 = rest[0].parse()?;
-            Ok(Command::TagToggle { tags, output })
+            let cmd: TagToggleCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::TagToggle {
+                tags: cmd.tags,
+                output: parse_output_specifier(cmd.output),
+            })
         }
         "tag-view-last" => Ok(Command::TagViewLast),
         "window-move-to-tag" => {
-            if rest.is_empty() {
-                bail!("Usage: window-move-to-tag <tags>");
-            }
-            let tags: u32 = rest[0].parse()?;
-            Ok(Command::WindowMoveToTag { tags })
+            let cmd: WindowMoveToTagCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::WindowMoveToTag { tags: cmd.tags })
         }
         "window-toggle-tag" => {
-            if rest.is_empty() {
-                bail!("Usage: window-toggle-tag <tags>");
-            }
-            let tags: u32 = rest[0].parse()?;
-            Ok(Command::WindowToggleTag { tags })
+            let cmd: WindowToggleTagCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::WindowToggleTag { tags: cmd.tags })
         }
         "window-focus" => {
-            if rest.is_empty() {
-                bail!("Usage: window-focus <direction>");
-            }
-            let direction = parse_direction(&rest[0])?;
-            Ok(Command::WindowFocus { direction })
-        }
-        "window-swap" => {
-            if rest.is_empty() {
-                bail!("Usage: window-swap <direction>");
-            }
-            let direction = parse_direction(&rest[0])?;
-            Ok(Command::WindowSwap { direction })
-        }
-        "output-focus" => {
-            if rest.is_empty() {
-                bail!("Usage: output-focus <next|prev>");
-            }
-            let direction = parse_output_direction(&rest[0])?;
-            Ok(Command::OutputFocus { direction })
-        }
-        "output-send" => {
-            if rest.is_empty() {
-                bail!("Usage: output-send <next|prev>");
-            }
-            let direction = parse_output_direction(&rest[0])?;
-            Ok(Command::OutputSend { direction })
-        }
-        "retile" => {
-            let (output, _rest) = parse_output_option(rest);
-            Ok(Command::Retile { output })
-        }
-        "layout-set-default" => {
-            if rest.is_empty() {
-                bail!("Usage: layout-set-default <layout>");
-            }
-            Ok(Command::LayoutSetDefault {
-                layout: rest[0].clone(),
+            let cmd: WindowFocusCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::WindowFocus {
+                direction: parse_direction(&cmd.direction)?,
             })
         }
+        "window-swap" => {
+            let cmd: WindowSwapCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::WindowSwap {
+                direction: parse_direction(&cmd.direction)?,
+            })
+        }
+        "output-focus" => {
+            let cmd: OutputFocusCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::OutputFocus {
+                direction: parse_output_direction(&cmd.direction)?,
+            })
+        }
+        "output-send" => {
+            let cmd: OutputSendCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::OutputSend {
+                direction: parse_output_direction(&cmd.direction)?,
+            })
+        }
+        "retile" => {
+            let cmd: RetileCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::Retile {
+                output: parse_output_specifier(cmd.output),
+            })
+        }
+        "layout-set-default" => {
+            let cmd: LayoutSetDefaultCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::LayoutSetDefault { layout: cmd.layout })
+        }
         "layout-set" => {
-            // Parse --tags and --output options if present
-            let (output, rest) = parse_output_option(rest);
-            let (tags, layout) = if rest.len() >= 3 && rest[0] == "--tags" {
-                let tags: u32 = rest[1].parse()?;
-                (Some(tags), rest[2].clone())
-            } else if rest.is_empty() {
-                bail!("Usage: layout-set [--tags <tags>] [--output <id|name>] <layout>");
-            } else {
-                (None, rest[0].clone())
-            };
+            let cmd: LayoutSetCmd = from_argh(cmd_name, &cmd_args)?;
             Ok(Command::LayoutSet {
-                tags,
-                output,
-                layout,
+                tags: cmd.tags,
+                output: parse_output_specifier(cmd.output),
+                layout: cmd.layout,
             })
         }
         "layout-get" => {
-            // Parse --tags and --output options if present
-            let (output, rest) = parse_output_option(rest);
-            let tags = if rest.len() >= 2 && rest[0] == "--tags" {
-                Some(rest[1].parse()?)
-            } else {
-                None
-            };
-            Ok(Command::LayoutGet { tags, output })
+            let cmd: LayoutGetCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::LayoutGet {
+                tags: cmd.tags,
+                output: parse_output_specifier(cmd.output),
+            })
         }
         "layout-cmd" => {
-            if rest.is_empty() {
-                bail!("Usage: layout-cmd <cmd> [args...]");
-            }
+            let cmd: LayoutCmdCmd = from_argh(cmd_name, &cmd_args)?;
             Ok(Command::LayoutCommand {
-                cmd: rest[0].clone(),
-                args: rest[1..].to_vec(),
+                cmd: cmd.cmd,
+                args: cmd.args,
             })
         }
         "list-windows" => Ok(Command::ListWindows),
@@ -591,23 +563,20 @@ fn parse_command(args: &[String]) -> Result<Command> {
         "get-state" => Ok(Command::GetState),
         "focused-window" => Ok(Command::FocusedWindow),
         "exec" => {
-            if rest.is_empty() {
-                bail!("Usage: exec <command>");
-            }
+            let cmd: ExecCmd = from_argh(cmd_name, &cmd_args)?;
             Ok(Command::Exec {
-                command: rest[0].clone(),
+                command: cmd.command,
             })
         }
         "exec-or-focus" => {
-            if rest.len() < 3 || rest[0] != "--app-name" {
-                bail!("Usage: exec-or-focus --app-name <name> <command>");
-            }
-            let app_name = rest[1].clone();
-            let command = rest[2].clone();
-            Ok(Command::ExecOrFocus { app_name, command })
+            let cmd: ExecOrFocusCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::ExecOrFocus {
+                app_name: cmd.app_name,
+                command: cmd.command,
+            })
         }
         "quit" => Ok(Command::Quit),
-        _ => bail!("Unknown command: {}", cmd),
+        _ => bail!("Unknown command: {}", cmd_name),
     }
 }
 
@@ -642,13 +611,4 @@ fn parse_output_specifier(s: Option<String>) -> Option<OutputSpecifier> {
             OutputSpecifier::Name(s)
         }
     })
-}
-
-fn parse_output_option(args: &[String]) -> (Option<OutputSpecifier>, &[String]) {
-    if args.len() >= 2 && args[0] == "--output" {
-        let output = parse_output_specifier(Some(args[1].clone()));
-        (output, &args[2..])
-    } else {
-        (None, args)
-    }
 }
