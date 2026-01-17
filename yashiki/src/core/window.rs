@@ -44,7 +44,7 @@ impl Window {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,

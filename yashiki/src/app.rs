@@ -1,22 +1,19 @@
-use crate::core::{Rect, State, WindowMove};
+use crate::core::{State, WindowMove};
+use crate::effect::{CommandResult, Effect};
 use crate::event::Event;
 use crate::ipc::IpcServer;
 use crate::layout::LayoutEngine;
 use crate::macos;
-use crate::macos::{
-    activate_application, AXUIElement, HotkeyManager, ObserverManager, WorkspaceEvent,
-    WorkspaceWatcher,
-};
+use crate::macos::{HotkeyManager, ObserverManager, WorkspaceEvent, WorkspaceWatcher};
 use crate::pid;
-use crate::platform::MacOSWindowSystem;
+use crate::platform::{MacOSWindowManipulator, MacOSWindowSystem, WindowManipulator};
 use anyhow::Result;
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
-use core_graphics::geometry::{CGPoint, CGSize};
 use objc2_foundation::MainThreadMarker;
 use std::cell::RefCell;
 use std::sync::mpsc as std_mpsc;
 use tokio::sync::mpsc;
-use yashiki_ipc::{BindingInfo, Command, Response, StateInfo, WindowGeometry, WindowInfo};
+use yashiki_ipc::{BindingInfo, Command, Response, StateInfo, WindowInfo};
 
 type IpcCommandWithResponse = (Command, mpsc::Sender<Response>);
 
@@ -31,6 +28,7 @@ struct RunLoopContext {
     layout_engine: RefCell<Option<LayoutEngine>>,
     hotkey_manager: RefCell<HotkeyManager>,
     window_system: MacOSWindowSystem,
+    window_manipulator: MacOSWindowManipulator,
 }
 
 pub struct App {}
@@ -144,16 +142,20 @@ impl App {
         let state = RefCell::new(state);
 
         // Spawn layout engine
-        let mut layout_engine = match LayoutEngine::spawn("tatami") {
+        let layout_engine = match LayoutEngine::spawn("tatami") {
             Ok(engine) => Some(engine),
             Err(e) => {
                 tracing::warn!("Failed to spawn layout engine: {}", e);
                 None
             }
         };
+        let layout_engine = RefCell::new(layout_engine);
+
+        // Create window manipulator
+        let window_manipulator = MacOSWindowManipulator::default();
 
         // Initial retile
-        do_retile(&state, &mut layout_engine);
+        do_retile(&state, &layout_engine, &window_manipulator);
 
         // Create hotkey manager
         let (hotkey_cmd_tx, hotkey_cmd_rx) = std_mpsc::channel::<Command>();
@@ -173,9 +175,10 @@ impl App {
             event_tx,
             observer_manager: RefCell::new(observer_manager),
             state,
-            layout_engine: RefCell::new(layout_engine),
+            layout_engine,
             hotkey_manager: RefCell::new(hotkey_manager),
             window_system,
+            window_manipulator,
         });
         let mut timer_context = core_foundation::runloop::CFRunLoopTimerContext {
             version: 0,
@@ -194,8 +197,13 @@ impl App {
             // Process IPC commands
             while let Ok((cmd, resp_tx)) = ctx.ipc_cmd_rx.try_recv() {
                 tracing::debug!("Received IPC command: {:?}", cmd);
-                let response =
-                    handle_ipc_command(&ctx.state, &ctx.layout_engine, &ctx.hotkey_manager, &cmd);
+                let response = handle_ipc_command(
+                    &ctx.state,
+                    &ctx.layout_engine,
+                    &ctx.hotkey_manager,
+                    &ctx.window_manipulator,
+                    &cmd,
+                );
                 let _ = resp_tx.blocking_send(response);
 
                 // Handle Quit command after sending response
@@ -207,8 +215,13 @@ impl App {
             // Process hotkey commands (no response needed)
             while let Ok(cmd) = ctx.hotkey_cmd_rx.try_recv() {
                 tracing::debug!("Received hotkey command: {:?}", cmd);
-                let _ =
-                    handle_ipc_command(&ctx.state, &ctx.layout_engine, &ctx.hotkey_manager, &cmd);
+                let _ = handle_ipc_command(
+                    &ctx.state,
+                    &ctx.layout_engine,
+                    &ctx.hotkey_manager,
+                    &ctx.window_manipulator,
+                    &cmd,
+                );
             }
 
             // Process workspace events (app launch/terminate)
@@ -225,7 +238,7 @@ impl App {
                         ctx.observer_manager.borrow_mut().remove_observer(pid);
                         // Remove windows belonging to this PID from state
                         if ctx.state.borrow_mut().sync_pid(&ctx.window_system, pid) {
-                            do_retile(&ctx.state, &mut ctx.layout_engine.borrow_mut());
+                            do_retile(&ctx.state, &ctx.layout_engine, &ctx.window_manipulator);
                         }
                     }
                 }
@@ -249,11 +262,12 @@ impl App {
 
                 // On external focus change, switch tag if focused window is hidden
                 if is_focus_event {
-                    if let Some(moves) = switch_tag_for_focused_window(
-                        &ctx.state,
-                        &mut ctx.layout_engine.borrow_mut(),
-                    ) {
-                        apply_window_moves(&moves);
+                    let moves = {
+                        let mut engine = ctx.layout_engine.borrow_mut();
+                        switch_tag_for_focused_window(&ctx.state, &mut *engine)
+                    };
+                    if let Some(moves) = moves {
+                        ctx.window_manipulator.apply_window_moves(&moves);
                         needs_retile = true;
                     }
                 }
@@ -263,7 +277,7 @@ impl App {
                 }
             }
             if needs_retile {
-                do_retile(&ctx.state, &mut ctx.layout_engine.borrow_mut());
+                do_retile(&ctx.state, &ctx.layout_engine, &ctx.window_manipulator);
             }
         }
 
@@ -329,15 +343,16 @@ fn run_init_script() {
     }
 }
 
-fn handle_ipc_command(
-    state: &RefCell<State>,
-    layout_engine: &RefCell<Option<LayoutEngine>>,
-    hotkey_manager: &RefCell<HotkeyManager>,
+/// Pure function: processes a command and returns a response with effects.
+/// This function does not perform any side effects - it only mutates state and computes effects.
+fn process_command(
+    state: &mut State,
+    hotkey_manager: &mut HotkeyManager,
     cmd: &Command,
-) -> Response {
+) -> CommandResult {
     match cmd {
+        // Query commands - no effects
         Command::ListWindows => {
-            let state = state.borrow();
             let windows: Vec<WindowInfo> = state
                 .windows
                 .values()
@@ -354,106 +369,20 @@ fn handle_ipc_command(
                     is_focused: state.focused == Some(w.id),
                 })
                 .collect();
-            Response::Windows { windows }
+            CommandResult::with_response(Response::Windows { windows })
         }
-        Command::GetState => {
-            let state = state.borrow();
-            Response::State {
-                state: StateInfo {
-                    visible_tags: state.visible_tags().mask(),
-                    focused_window_id: state.focused,
-                    window_count: state.windows.len(),
-                },
-            }
-        }
-        Command::FocusedWindow => Response::WindowId {
-            id: state.borrow().focused,
-        },
-        Command::ViewTag { tag } => {
-            let moves = state.borrow_mut().view_tag(*tag);
-            apply_window_moves(&moves);
-            // Retile after switching tag to layout shown windows
-            do_retile(&state, &mut layout_engine.borrow_mut());
-            // Focus a visible window if none is focused
-            focus_visible_window_if_needed(&state);
-            Response::Ok
-        }
-        Command::ToggleViewTag { tag } => {
-            let moves = state.borrow_mut().toggle_view_tag(*tag);
-            apply_window_moves(&moves);
-            // Retile after toggling tag
-            do_retile(&state, &mut layout_engine.borrow_mut());
-            // Focus a visible window if none is focused
-            focus_visible_window_if_needed(&state);
-            Response::Ok
-        }
-        Command::ViewTagLast => {
-            let moves = state.borrow_mut().view_tag_last();
-            apply_window_moves(&moves);
-            do_retile(&state, &mut layout_engine.borrow_mut());
-            focus_visible_window_if_needed(&state);
-            Response::Ok
-        }
-        Command::MoveToTag { tag } => {
-            let moves = state.borrow_mut().move_focused_to_tag(*tag);
-            apply_window_moves(&moves);
-            // Retile after moving window to tag
-            do_retile(&state, &mut layout_engine.borrow_mut());
-            // Focus a visible window since the moved window may now be hidden
-            focus_visible_window_if_needed(&state);
-            Response::Ok
-        }
-        Command::ToggleWindowTag { tag } => {
-            let moves = state.borrow_mut().toggle_focused_window_tag(*tag);
-            apply_window_moves(&moves);
-            // Retile after toggling window tag
-            do_retile(&state, &mut layout_engine.borrow_mut());
-            // Focus a visible window if needed
-            focus_visible_window_if_needed(&state);
-            Response::Ok
-        }
-        Command::LayoutCommand { cmd, args } => {
-            let result = {
-                let mut engine = layout_engine.borrow_mut();
-                if let Some(ref mut engine) = *engine {
-                    match engine.send_command(cmd, args) {
-                        Ok(()) => Ok(()),
-                        Err(e) => Err(format!("Layout command failed: {}", e)),
-                    }
-                } else {
-                    Err("No layout engine available".to_string())
-                }
-            };
-            match result {
-                Ok(()) => {
-                    // Retile to apply layout changes
-                    do_retile(&state, &mut layout_engine.borrow_mut());
-                    Response::Ok
-                }
-                Err(message) => Response::Error { message },
-            }
-        }
-        Command::Retile => {
-            do_retile(&state, &mut layout_engine.borrow_mut());
-            Response::Ok
-        }
-        Command::Bind { key, action } => {
-            let mut manager = hotkey_manager.borrow_mut();
-            match manager.bind(key, *action.clone()) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error { message: e },
-            }
-        }
-        Command::Unbind { key } => {
-            let mut manager = hotkey_manager.borrow_mut();
-            match manager.unbind(key) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error { message: e },
-            }
+        Command::GetState => CommandResult::with_response(Response::State {
+            state: StateInfo {
+                visible_tags: state.visible_tags().mask(),
+                focused_window_id: state.focused,
+                window_count: state.windows.len(),
+            },
+        }),
+        Command::FocusedWindow => {
+            CommandResult::with_response(Response::WindowId { id: state.focused })
         }
         Command::ListBindings => {
-            let manager = hotkey_manager.borrow();
-            let bindings: Vec<BindingInfo> = manager
+            let bindings: Vec<BindingInfo> = hotkey_manager
                 .list_bindings()
                 .into_iter()
                 .map(|(key, cmd)| BindingInfo {
@@ -461,104 +390,147 @@ fn handle_ipc_command(
                     action: format!("{:?}", cmd),
                 })
                 .collect();
-            Response::Bindings { bindings }
+            CommandResult::with_response(Response::Bindings { bindings })
         }
+
+        // Tag operations - mutate state, return effects
+        Command::ViewTag { tag } => {
+            let moves = state.view_tag(*tag);
+            CommandResult::ok_with_effects(vec![
+                Effect::ApplyWindowMoves(moves),
+                Effect::Retile,
+                Effect::FocusVisibleWindowIfNeeded,
+            ])
+        }
+        Command::ToggleViewTag { tag } => {
+            let moves = state.toggle_view_tag(*tag);
+            CommandResult::ok_with_effects(vec![
+                Effect::ApplyWindowMoves(moves),
+                Effect::Retile,
+                Effect::FocusVisibleWindowIfNeeded,
+            ])
+        }
+        Command::ViewTagLast => {
+            let moves = state.view_tag_last();
+            CommandResult::ok_with_effects(vec![
+                Effect::ApplyWindowMoves(moves),
+                Effect::Retile,
+                Effect::FocusVisibleWindowIfNeeded,
+            ])
+        }
+        Command::MoveToTag { tag } => {
+            let moves = state.move_focused_to_tag(*tag);
+            CommandResult::ok_with_effects(vec![
+                Effect::ApplyWindowMoves(moves),
+                Effect::Retile,
+                Effect::FocusVisibleWindowIfNeeded,
+            ])
+        }
+        Command::ToggleWindowTag { tag } => {
+            let moves = state.toggle_focused_window_tag(*tag);
+            CommandResult::ok_with_effects(vec![
+                Effect::ApplyWindowMoves(moves),
+                Effect::Retile,
+                Effect::FocusVisibleWindowIfNeeded,
+            ])
+        }
+
+        // Hotkey operations
+        Command::Bind { key, action } => match hotkey_manager.bind(key, *action.clone()) {
+            Ok(()) => CommandResult::ok(),
+            Err(e) => CommandResult::error(e),
+        },
+        Command::Unbind { key } => match hotkey_manager.unbind(key) {
+            Ok(()) => CommandResult::ok(),
+            Err(e) => CommandResult::error(e),
+        },
+
+        // Focus operations
         Command::FocusWindow { direction } => {
-            let state = state.borrow();
             if let Some((window_id, pid)) = state.focus_window(*direction) {
                 tracing::info!("Focusing window {} (pid {})", window_id, pid);
-                focus_window_by_id(&state, window_id, pid);
-            }
-            Response::Ok
-        }
-        Command::Zoom => {
-            let focused_id = state.borrow().focused;
-            if let Some(window_id) = focused_id {
-                let result = {
-                    let mut engine = layout_engine.borrow_mut();
-                    if let Some(ref mut engine) = *engine {
-                        engine.send_command("zoom", &[window_id.to_string()])
-                    } else {
-                        Err(anyhow::anyhow!("No layout engine"))
-                    }
-                };
-                match result {
-                    Ok(()) => {
-                        do_retile(&state, &mut layout_engine.borrow_mut());
-                        Response::Ok
-                    }
-                    Err(e) => Response::Error {
-                        message: e.to_string(),
-                    },
-                }
+                CommandResult::ok_with_effects(vec![Effect::FocusWindow { window_id, pid }])
             } else {
-                Response::Error {
-                    message: "No focused window".to_string(),
-                }
+                CommandResult::ok()
             }
         }
         Command::FocusOutput { direction } => {
-            let result = state.borrow_mut().focus_output(*direction);
+            let result = state.focus_output(*direction);
             if let Some((window_id, pid)) = result {
                 tracing::info!("Focusing output - window {} (pid {})", window_id, pid);
-                focus_window_by_id(&state.borrow(), window_id, pid);
+                CommandResult::ok_with_effects(vec![Effect::FocusWindow { window_id, pid }])
+            } else {
+                CommandResult::ok()
             }
-            Response::Ok
         }
+
+        // Send to output - returns displays that need retiling
         Command::SendToOutput { direction } => {
-            let displays_to_retile = state.borrow_mut().send_to_output(*direction);
+            let displays_to_retile = state.send_to_output(*direction);
             if let Some((source_display, target_display)) = displays_to_retile {
-                // Move the focused window physically
-                {
-                    let s = state.borrow();
-                    if let Some(focused_id) = s.focused {
-                        if let Some(window) = s.windows.get(&focused_id) {
-                            move_window_to_position(
-                                window.pid,
-                                focused_id,
-                                &s,
-                                window.frame.x,
-                                window.frame.y,
-                            );
-                        }
+                // Get the window info for moving
+                let mut effects = Vec::new();
+                if let Some(focused_id) = state.focused {
+                    if let Some(window) = state.windows.get(&focused_id) {
+                        effects.push(Effect::MoveWindowToPosition {
+                            window_id: focused_id,
+                            pid: window.pid,
+                            x: window.frame.x,
+                            y: window.frame.y,
+                        });
                     }
                 }
-                // Retile both displays
-                do_retile_display(state, &mut layout_engine.borrow_mut(), source_display);
-                do_retile_display(state, &mut layout_engine.borrow_mut(), target_display);
+                effects.push(Effect::RetileDisplays(vec![source_display, target_display]));
+                CommandResult::ok_with_effects(effects)
+            } else {
+                CommandResult::ok()
             }
-            Response::Ok
         }
-        Command::Quit => {
-            tracing::info!("Quit command received");
-            Response::Ok
+
+        // Layout commands - need layout engine interaction (handled as effects)
+        Command::LayoutCommand { cmd, args } => CommandResult::ok_with_effects(vec![
+            Effect::SendLayoutCommand {
+                cmd: cmd.clone(),
+                args: args.clone(),
+            },
+            Effect::Retile,
+        ]),
+        Command::Retile => CommandResult::ok_with_effects(vec![Effect::Retile]),
+        Command::Zoom => {
+            if let Some(window_id) = state.focused {
+                CommandResult::ok_with_effects(vec![
+                    Effect::SendLayoutCommand {
+                        cmd: "zoom".to_string(),
+                        args: vec![window_id.to_string()],
+                    },
+                    Effect::Retile,
+                ])
+            } else {
+                CommandResult::error("No focused window")
+            }
         }
-        Command::Exec { command } => match macos::exec_command(command) {
-            Ok(()) => Response::Ok,
-            Err(message) => Response::Error { message },
-        },
+
+        // Exec commands
+        Command::Exec { command } => {
+            CommandResult::ok_with_effects(vec![Effect::ExecCommand(command.clone())])
+        }
         Command::ExecOrFocus { app_name, command } => {
             // Check if a window with the given app_name exists
-            let existing_window = {
-                let s = state.borrow();
-                s.windows
-                    .values()
-                    .find(|w| w.app_name == *app_name)
-                    .map(|w| (w.id, w.pid, w.tags, w.display_id, w.is_hidden()))
-            };
+            let existing_window = state
+                .windows
+                .values()
+                .find(|w| w.app_name == *app_name)
+                .map(|w| (w.id, w.pid, w.tags, w.display_id, w.is_hidden()));
 
             if let Some((window_id, pid, window_tags, window_display_id, is_hidden)) =
                 existing_window
             {
                 // Check if window is visible on its display
-                let is_visible = {
-                    let s = state.borrow();
-                    if let Some(display) = s.displays.get(&window_display_id) {
-                        window_tags.intersects(display.visible_tags) && !is_hidden
-                    } else {
-                        false
-                    }
-                };
+                let is_visible = state
+                    .displays
+                    .get(&window_display_id)
+                    .map(|display| window_tags.intersects(display.visible_tags) && !is_hidden)
+                    .unwrap_or(false);
 
                 if is_visible {
                     tracing::info!(
@@ -567,7 +539,7 @@ fn handle_ipc_command(
                         window_id,
                         pid
                     );
-                    focus_window_by_id(&state.borrow(), window_id, pid);
+                    CommandResult::ok_with_effects(vec![Effect::FocusWindow { window_id, pid }])
                 } else {
                     // Window is hidden, switch to its tag first
                     if let Some(tag) = window_tags.first_tag() {
@@ -578,35 +550,139 @@ fn handle_ipc_command(
                             window_id,
                             pid
                         );
-                        let moves = state.borrow_mut().view_tag(tag);
-                        apply_window_moves(&moves);
-                        do_retile(&state, &mut layout_engine.borrow_mut());
+                        let moves = state.view_tag(tag);
+                        CommandResult::ok_with_effects(vec![
+                            Effect::ApplyWindowMoves(moves),
+                            Effect::Retile,
+                            Effect::FocusWindow { window_id, pid },
+                        ])
+                    } else {
+                        CommandResult::ok_with_effects(vec![Effect::FocusWindow { window_id, pid }])
                     }
-                    focus_window_by_id(&state.borrow(), window_id, pid);
                 }
-                Response::Ok
             } else {
                 tracing::info!(
                     "No existing window for app '{}', executing command",
                     app_name
                 );
-                match macos::exec_command(command) {
-                    Ok(()) => Response::Ok,
-                    Err(message) => Response::Error { message },
-                }
+                CommandResult::ok_with_effects(vec![Effect::ExecCommand(command.clone())])
             }
         }
+
+        // Control
+        Command::Quit => {
+            tracing::info!("Quit command received");
+            CommandResult::ok()
+        }
+
+        // Unhandled commands
         _ => {
             tracing::warn!("Unhandled command: {:?}", cmd);
-            Response::Error {
-                message: "Command not yet implemented".to_string(),
-            }
+            CommandResult::error("Command not yet implemented")
         }
     }
 }
 
-fn do_retile(state: &RefCell<State>, layout_engine: &mut Option<LayoutEngine>) {
-    let Some(ref mut engine) = layout_engine else {
+/// Execute side effects.
+fn execute_effects<M: WindowManipulator>(
+    effects: Vec<Effect>,
+    state: &RefCell<State>,
+    layout_engine: &RefCell<Option<LayoutEngine>>,
+    manipulator: &M,
+) -> Result<(), String> {
+    for effect in effects {
+        match effect {
+            Effect::ApplyWindowMoves(moves) => {
+                manipulator.apply_window_moves(&moves);
+            }
+            Effect::ApplyLayout {
+                display_id,
+                frame,
+                geometries,
+            } => {
+                manipulator.apply_layout(display_id, &frame, &geometries);
+            }
+            Effect::FocusWindow { window_id, pid } => {
+                manipulator.focus_window(window_id, pid);
+            }
+            Effect::MoveWindowToPosition {
+                window_id,
+                pid,
+                x,
+                y,
+            } => {
+                manipulator.move_window_to_position(window_id, pid, x, y);
+            }
+            Effect::Retile => {
+                do_retile(state, layout_engine, manipulator);
+            }
+            Effect::RetileDisplay(display_id) => {
+                do_retile_display(state, layout_engine, manipulator, display_id);
+            }
+            Effect::RetileDisplays(display_ids) => {
+                for display_id in display_ids {
+                    do_retile_display(state, layout_engine, manipulator, display_id);
+                }
+            }
+            Effect::SendLayoutCommand { cmd, args } => {
+                let mut engine = layout_engine.borrow_mut();
+                if let Some(ref mut engine) = *engine {
+                    if let Err(e) = engine.send_command(&cmd, &args) {
+                        return Err(format!("Layout command failed: {}", e));
+                    }
+                } else {
+                    return Err("No layout engine available".to_string());
+                }
+            }
+            Effect::ExecCommand(command) => {
+                manipulator.exec_command(&command)?;
+            }
+            Effect::FocusVisibleWindowIfNeeded => {
+                focus_visible_window_if_needed(state, manipulator);
+            }
+            Effect::UpdateWindowOrder {
+                display_id,
+                window_ids,
+            } => {
+                let mut state = state.borrow_mut();
+                if let Some(display) = state.displays.get_mut(&display_id) {
+                    display.window_order = window_ids;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Main entry point for handling IPC commands.
+/// This function orchestrates process_command and execute_effects.
+fn handle_ipc_command<M: WindowManipulator>(
+    state: &RefCell<State>,
+    layout_engine: &RefCell<Option<LayoutEngine>>,
+    hotkey_manager: &RefCell<HotkeyManager>,
+    manipulator: &M,
+    cmd: &Command,
+) -> Response {
+    let result = process_command(
+        &mut state.borrow_mut(),
+        &mut hotkey_manager.borrow_mut(),
+        cmd,
+    );
+
+    if let Err(e) = execute_effects(result.effects, state, layout_engine, manipulator) {
+        return Response::Error { message: e };
+    }
+
+    result.response
+}
+
+fn do_retile<M: WindowManipulator>(
+    state: &RefCell<State>,
+    layout_engine: &RefCell<Option<LayoutEngine>>,
+    manipulator: &M,
+) {
+    let mut engine = layout_engine.borrow_mut();
+    let Some(ref mut engine) = *engine else {
         return;
     };
 
@@ -614,27 +690,30 @@ fn do_retile(state: &RefCell<State>, layout_engine: &mut Option<LayoutEngine>) {
     let display_ids: Vec<_> = state.borrow().displays.keys().copied().collect();
 
     for display_id in display_ids {
-        retile_single_display(state, engine, display_id);
+        retile_single_display(state, engine, manipulator, display_id);
     }
 }
 
-fn do_retile_display(
+fn do_retile_display<M: WindowManipulator>(
     state: &RefCell<State>,
-    layout_engine: &mut Option<LayoutEngine>,
+    layout_engine: &RefCell<Option<LayoutEngine>>,
+    manipulator: &M,
     display_id: crate::macos::DisplayId,
 ) {
-    let Some(ref mut engine) = layout_engine else {
+    let mut engine = layout_engine.borrow_mut();
+    let Some(ref mut engine) = *engine else {
         return;
     };
     if !state.borrow().displays.contains_key(&display_id) {
         return;
     }
-    retile_single_display(state, engine, display_id);
+    retile_single_display(state, engine, manipulator, display_id);
 }
 
-fn retile_single_display(
+fn retile_single_display<M: WindowManipulator>(
     state: &RefCell<State>,
     engine: &mut LayoutEngine,
+    manipulator: &M,
     display_id: crate::macos::DisplayId,
 ) {
     // Get layout parameters with immutable borrow
@@ -665,9 +744,8 @@ fn retile_single_display(
                     display.window_order = geometries.iter().map(|g| g.id).collect();
                 }
             }
-            // Apply layout
-            let state = state.borrow();
-            apply_layout_on_display(&state, display_id, &display_frame, &geometries);
+            // Apply layout using manipulator
+            manipulator.apply_layout(display_id, &display_frame, &geometries);
         }
         Err(e) => {
             tracing::error!("Layout request failed for display {}: {}", display_id, e);
@@ -675,79 +753,7 @@ fn retile_single_display(
     }
 }
 
-fn move_window_to_position(pid: i32, window_id: u32, _state: &State, x: i32, y: i32) {
-    let app = AXUIElement::application(pid);
-    let ax_windows = match app.windows() {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
-            return;
-        }
-    };
-
-    // Find matching AX window by window_id
-    for ax_win in &ax_windows {
-        if let Some(wid) = ax_win.window_id() {
-            if wid == window_id {
-                let new_pos = CGPoint::new(x as f64, y as f64);
-                if let Err(e) = ax_win.set_position(new_pos) {
-                    tracing::warn!(
-                        "Failed to move window {} to ({}, {}): {}",
-                        window_id,
-                        x,
-                        y,
-                        e
-                    );
-                } else {
-                    tracing::info!("Moved window {} to ({}, {})", window_id, x, y);
-                }
-                return;
-            }
-        }
-    }
-
-    tracing::warn!(
-        "Could not find AX window for id {} (pid {})",
-        window_id,
-        pid
-    );
-}
-
-fn focus_window_by_id(_state: &State, window_id: u32, pid: i32) {
-    // Activate the application first
-    activate_application(pid);
-
-    // Get AX windows and find the matching one by window_id
-    let app = AXUIElement::application(pid);
-    let ax_windows = match app.windows() {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
-            return;
-        }
-    };
-
-    for ax_win in &ax_windows {
-        if let Some(wid) = ax_win.window_id() {
-            if wid == window_id {
-                if let Err(e) = ax_win.raise() {
-                    tracing::warn!("Failed to raise window {}: {}", window_id, e);
-                } else {
-                    tracing::debug!("Raised window {} (pid {})", window_id, pid);
-                }
-                return;
-            }
-        }
-    }
-
-    tracing::warn!(
-        "Could not find AX window for id {} (pid {})",
-        window_id,
-        pid
-    );
-}
-
-fn focus_visible_window_if_needed(state: &RefCell<State>) {
+fn focus_visible_window_if_needed<M: WindowManipulator>(state: &RefCell<State>, manipulator: &M) {
     let state = state.borrow();
     let visible_windows = state.visible_windows_on_display(state.focused_display);
 
@@ -769,152 +775,14 @@ fn focus_visible_window_if_needed(state: &RefCell<State>) {
                 window.id,
                 window.app_name
             );
-            focus_window_by_id(&state, window.id, window.pid);
-        }
-    }
-}
-
-fn apply_window_moves(moves: &[WindowMove]) {
-    // Group moves by PID to minimize AX calls
-    use std::collections::HashMap;
-    let mut by_pid: HashMap<i32, Vec<&WindowMove>> = HashMap::new();
-    for m in moves {
-        by_pid.entry(m.pid).or_default().push(m);
-    }
-
-    for (pid, pid_moves) in by_pid {
-        let app = AXUIElement::application(pid);
-        let ax_windows = match app.windows() {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
-                continue;
-            }
-        };
-
-        for m in pid_moves {
-            // Find matching AX window by window_id
-            let mut found = false;
-            for ax_win in &ax_windows {
-                if let Some(wid) = ax_win.window_id() {
-                    if wid == m.window_id {
-                        let new_pos = CGPoint::new(m.new_x as f64, m.new_y as f64);
-                        if let Err(e) = ax_win.set_position(new_pos) {
-                            tracing::warn!(
-                                "Failed to move window (id={}, pid={}, to=({}, {})): {}",
-                                m.window_id,
-                                m.pid,
-                                m.new_x,
-                                m.new_y,
-                                e
-                            );
-                        } else {
-                            tracing::debug!(
-                                "Moved window (id={}, pid={}) to ({}, {})",
-                                m.window_id,
-                                m.pid,
-                                m.new_x,
-                                m.new_y
-                            );
-                        }
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if !found {
-                tracing::warn!(
-                    "Could not find AX window for id {} (pid {})",
-                    m.window_id,
-                    m.pid
-                );
-            }
-        }
-    }
-}
-
-fn apply_layout_on_display(
-    state: &State,
-    display_id: crate::macos::DisplayId,
-    frame: &Rect,
-    geometries: &[WindowGeometry],
-) {
-    use std::collections::HashMap;
-
-    // Display offset
-    let offset_x = frame.x;
-    let offset_y = frame.y;
-
-    // Build a map of pid -> [(window_id, geometry)]
-    let mut by_pid: HashMap<i32, Vec<(u32, &WindowGeometry)>> = HashMap::new();
-    for geom in geometries {
-        if let Some(window) = state.windows.get(&geom.id) {
-            by_pid.entry(window.pid).or_default().push((geom.id, geom));
-        }
-    }
-
-    for (pid, windows) in by_pid {
-        let app = AXUIElement::application(pid);
-        let ax_windows = match app.windows() {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
-                continue;
-            }
-        };
-
-        for (window_id, geom) in windows {
-            // Find matching AX window by window_id
-            let mut found = false;
-            for ax_win in &ax_windows {
-                if let Some(wid) = ax_win.window_id() {
-                    if wid == window_id {
-                        // Apply new geometry with display offset
-                        let new_x = geom.x as i32 + offset_x;
-                        let new_y = geom.y as i32 + offset_y;
-                        let new_pos = CGPoint::new(new_x as f64, new_y as f64);
-                        let new_size = CGSize::new(geom.width as f64, geom.height as f64);
-
-                        if let Err(e) = ax_win.set_position(new_pos) {
-                            tracing::warn!(
-                                "Failed to set position for window {}: {}",
-                                window_id,
-                                e
-                            );
-                        }
-                        if let Err(e) = ax_win.set_size(new_size) {
-                            tracing::warn!("Failed to set size for window {}: {}", window_id, e);
-                        }
-
-                        tracing::debug!(
-                            "Applied layout to window {} (pid={}) on display {}: ({}, {}) {}x{}",
-                            window_id,
-                            pid,
-                            display_id,
-                            new_x,
-                            new_y,
-                            geom.width,
-                            geom.height
-                        );
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if !found {
-                tracing::warn!(
-                    "Could not find AX window for id {} (pid {}) when applying layout",
-                    window_id,
-                    pid
-                );
-            }
+            manipulator.focus_window(window.id, window.pid);
         }
     }
 }
 
 fn switch_tag_for_focused_window(
     state: &RefCell<State>,
-    layout_engine: &mut Option<LayoutEngine>,
+    _layout_engine: &mut Option<LayoutEngine>,
 ) -> Option<Vec<WindowMove>> {
     let (focused_id, window_tags, window_display_id, is_hidden) = {
         let s = state.borrow();
@@ -951,9 +819,255 @@ fn switch_tag_for_focused_window(
     );
 
     let moves = state.borrow_mut().view_tag(tag);
-    if !moves.is_empty() {
-        // Need to retile after tag switch
-        do_retile(state, layout_engine);
-    }
+    // Note: Retiling is handled by the caller after applying moves
     Some(moves)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::effect::Effect;
+    use crate::platform::mock::{create_test_display, create_test_window, MockWindowSystem};
+    use yashiki_ipc::{Command, Direction, Response};
+
+    fn setup_state() -> (State, HotkeyManager) {
+        let ws = MockWindowSystem::new()
+            .with_displays(vec![create_test_display(1, 0.0, 0.0, 1920.0, 1080.0)])
+            .with_windows(vec![
+                create_test_window(100, 1000, "Safari", 0.0, 0.0, 960.0, 1080.0),
+                create_test_window(101, 1001, "Terminal", 960.0, 0.0, 960.0, 1080.0),
+                create_test_window(102, 1002, "VSCode", 0.0, 0.0, 960.0, 540.0),
+            ])
+            .with_focused(Some(100));
+
+        let mut state = State::new();
+        state.sync_all(&ws);
+
+        let (tx, _rx) = std_mpsc::channel();
+        let hotkey_manager = HotkeyManager::new(tx);
+
+        (state, hotkey_manager)
+    }
+
+    #[test]
+    fn test_query_commands_have_no_effects() {
+        let (mut state, mut hotkey_manager) = setup_state();
+
+        // ListWindows
+        let result = process_command(&mut state, &mut hotkey_manager, &Command::ListWindows);
+        assert!(result.effects.is_empty());
+        assert!(matches!(result.response, Response::Windows { .. }));
+
+        // GetState
+        let result = process_command(&mut state, &mut hotkey_manager, &Command::GetState);
+        assert!(result.effects.is_empty());
+        assert!(matches!(result.response, Response::State { .. }));
+
+        // FocusedWindow
+        let result = process_command(&mut state, &mut hotkey_manager, &Command::FocusedWindow);
+        assert!(result.effects.is_empty());
+        assert!(matches!(result.response, Response::WindowId { .. }));
+
+        // ListBindings
+        let result = process_command(&mut state, &mut hotkey_manager, &Command::ListBindings);
+        assert!(result.effects.is_empty());
+        assert!(matches!(result.response, Response::Bindings { .. }));
+    }
+
+    #[test]
+    fn test_view_tag_produces_correct_effects() {
+        let (mut state, mut hotkey_manager) = setup_state();
+
+        let result = process_command(
+            &mut state,
+            &mut hotkey_manager,
+            &Command::ViewTag { tag: 2 },
+        );
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.effects.len(), 3);
+
+        // Should have ApplyWindowMoves, Retile, FocusVisibleWindowIfNeeded
+        assert!(matches!(result.effects[0], Effect::ApplyWindowMoves(_)));
+        assert!(matches!(result.effects[1], Effect::Retile));
+        assert!(matches!(
+            result.effects[2],
+            Effect::FocusVisibleWindowIfNeeded
+        ));
+    }
+
+    #[test]
+    fn test_focus_window_produces_focus_effect() {
+        let (mut state, mut hotkey_manager) = setup_state();
+
+        let result = process_command(
+            &mut state,
+            &mut hotkey_manager,
+            &Command::FocusWindow {
+                direction: Direction::Next,
+            },
+        );
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.effects.len(), 1);
+
+        match &result.effects[0] {
+            Effect::FocusWindow { window_id, pid } => {
+                assert_eq!(*window_id, 101); // Next window after 100
+                assert_eq!(*pid, 1001);
+            }
+            _ => panic!("Expected FocusWindow effect"),
+        }
+    }
+
+    #[test]
+    fn test_exec_produces_exec_effect() {
+        let (mut state, mut hotkey_manager) = setup_state();
+
+        let result = process_command(
+            &mut state,
+            &mut hotkey_manager,
+            &Command::Exec {
+                command: "open -a Safari".to_string(),
+            },
+        );
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.effects.len(), 1);
+
+        match &result.effects[0] {
+            Effect::ExecCommand(cmd) => {
+                assert_eq!(cmd, "open -a Safari");
+            }
+            _ => panic!("Expected ExecCommand effect"),
+        }
+    }
+
+    #[test]
+    fn test_exec_or_focus_existing_window_focuses() {
+        let (mut state, mut hotkey_manager) = setup_state();
+
+        let result = process_command(
+            &mut state,
+            &mut hotkey_manager,
+            &Command::ExecOrFocus {
+                app_name: "Safari".to_string(),
+                command: "open -a Safari".to_string(),
+            },
+        );
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.effects.len(), 1);
+
+        // Should focus the existing Safari window, not execute command
+        match &result.effects[0] {
+            Effect::FocusWindow { window_id, pid } => {
+                assert_eq!(*window_id, 100); // Safari window
+                assert_eq!(*pid, 1000);
+            }
+            _ => panic!("Expected FocusWindow effect, got {:?}", result.effects[0]),
+        }
+    }
+
+    #[test]
+    fn test_exec_or_focus_new_app_executes() {
+        let (mut state, mut hotkey_manager) = setup_state();
+
+        let result = process_command(
+            &mut state,
+            &mut hotkey_manager,
+            &Command::ExecOrFocus {
+                app_name: "Slack".to_string(), // App not in our mock windows
+                command: "open -a Slack".to_string(),
+            },
+        );
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.effects.len(), 1);
+
+        // Should execute command since Slack is not running
+        match &result.effects[0] {
+            Effect::ExecCommand(cmd) => {
+                assert_eq!(cmd, "open -a Slack");
+            }
+            _ => panic!("Expected ExecCommand effect, got {:?}", result.effects[0]),
+        }
+    }
+
+    #[test]
+    fn test_layout_command_produces_send_and_retile() {
+        let (mut state, mut hotkey_manager) = setup_state();
+
+        let result = process_command(
+            &mut state,
+            &mut hotkey_manager,
+            &Command::LayoutCommand {
+                cmd: "set-main-ratio".to_string(),
+                args: vec!["0.6".to_string()],
+            },
+        );
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.effects.len(), 2);
+
+        match &result.effects[0] {
+            Effect::SendLayoutCommand { cmd, args } => {
+                assert_eq!(cmd, "set-main-ratio");
+                assert_eq!(args, &vec!["0.6".to_string()]);
+            }
+            _ => panic!("Expected SendLayoutCommand effect"),
+        }
+        assert!(matches!(result.effects[1], Effect::Retile));
+    }
+
+    #[test]
+    fn test_retile_produces_retile_effect() {
+        let (mut state, mut hotkey_manager) = setup_state();
+
+        let result = process_command(&mut state, &mut hotkey_manager, &Command::Retile);
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.effects.len(), 1);
+        assert!(matches!(result.effects[0], Effect::Retile));
+    }
+
+    #[test]
+    fn test_zoom_without_focused_window_returns_error() {
+        let (mut state, mut hotkey_manager) = setup_state();
+        state.focused = None;
+
+        let result = process_command(&mut state, &mut hotkey_manager, &Command::Zoom);
+
+        assert!(matches!(result.response, Response::Error { .. }));
+        assert!(result.effects.is_empty());
+    }
+
+    #[test]
+    fn test_zoom_with_focused_window_produces_effects() {
+        let (mut state, mut hotkey_manager) = setup_state();
+
+        let result = process_command(&mut state, &mut hotkey_manager, &Command::Zoom);
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.effects.len(), 2);
+
+        match &result.effects[0] {
+            Effect::SendLayoutCommand { cmd, args } => {
+                assert_eq!(cmd, "zoom");
+                assert_eq!(args, &vec!["100".to_string()]); // Focused window ID
+            }
+            _ => panic!("Expected SendLayoutCommand effect"),
+        }
+        assert!(matches!(result.effects[1], Effect::Retile));
+    }
+
+    #[test]
+    fn test_quit_has_no_effects() {
+        let (mut state, mut hotkey_manager) = setup_state();
+
+        let result = process_command(&mut state, &mut hotkey_manager, &Command::Quit);
+
+        assert!(matches!(result.response, Response::Ok));
+        assert!(result.effects.is_empty());
+    }
 }

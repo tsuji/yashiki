@@ -1,5 +1,6 @@
 mod app;
 mod core;
+mod effect;
 mod event;
 mod ipc;
 mod layout;

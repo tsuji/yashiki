@@ -165,6 +165,13 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
   - Processes: IPC commands, hotkey commands, workspace events, observer events
   - Auto-retile on window add/remove
   - Runs init script at startup
+  - Effect pattern: `process_command()` (pure) + `execute_effects()` (side effects)
+- **effect.rs** - Effect enum and CommandResult for separating pure computation from side effects
+- **platform.rs** - Platform abstraction layer
+  - `WindowSystem` trait for querying window/display info
+  - `WindowManipulator` trait for window manipulation side effects
+  - `MacOSWindowSystem` / `MacOSWindowManipulator` - Production implementations
+  - `MockWindowSystem` / `MockWindowManipulator` - Test implementations
 - **main.rs** - Daemon + CLI mode
 - **yashiki-ipc/** - Command/Response/LayoutMessage enums
 
@@ -259,7 +266,7 @@ Focus involves: `activate_application(pid)` then `AXUIElement.raise()`
 
 ## Testing
 
-### Current Test Coverage (54 tests)
+### Current Test Coverage (65 tests)
 
 Run tests: `cargo test --all`
 
@@ -268,75 +275,101 @@ Run tests: `cargo test --all`
 - `macos/hotkey.rs` - `parse_hotkey()`, `format_hotkey()` (15 tests)
 - `yashiki-ipc` - Command/Response/LayoutMessage serialization (17 tests)
 - `core/state.rs` - State management with MockWindowSystem (13 tests)
+- `app.rs` - `process_command()` effect generation (11 tests)
 
 ### Platform Abstraction Layer
 
-`platform.rs` provides `WindowSystem` trait for testability:
+`platform.rs` provides traits for testability:
 
 ```rust
+// For querying window/display information
 pub trait WindowSystem {
     fn get_on_screen_windows(&self) -> Vec<WindowInfo>;
     fn get_all_displays(&self) -> Vec<DisplayInfo>;
     fn get_focused_window(&self) -> Option<FocusedWindowInfo>;
 }
+
+// For window manipulation side effects
+pub trait WindowManipulator {
+    fn apply_window_moves(&self, moves: &[WindowMove]);
+    fn apply_layout(&self, display_id: DisplayId, frame: &Rect, geometries: &[WindowGeometry]);
+    fn focus_window(&self, window_id: u32, pid: i32);
+    fn move_window_to_position(&self, window_id: u32, pid: i32, x: i32, y: i32);
+    fn exec_command(&self, command: &str) -> Result<(), String>;
+}
 ```
 
-- `MacOSWindowSystem` - Production implementation (wraps macos/ module)
-- `MockWindowSystem` - Test implementation (`#[cfg(test)]` only)
+- `MacOSWindowSystem` / `MacOSWindowManipulator` - Production implementations
+- `MockWindowSystem` / `MockWindowManipulator` - Test implementations (`#[cfg(test)]` only)
 
-State methods now take `WindowSystem` as parameter:
+State methods take `WindowSystem` as parameter:
 - `state.sync_all(&window_system)`
 - `state.sync_pid(&window_system, pid)`
 - `state.handle_event(&window_system, &event)`
 
-### TODO: Phase 4 - Effect Pattern (Not Yet Implemented)
+### Effect Pattern
 
-Goal: Separate `handle_ipc_command()` (~300 lines in app.rs) into pure computation and side effects.
+Command handling is separated into pure computation and side effects for testability.
 
-**Current architecture (tightly coupled):**
+**Architecture:**
 ```rust
-fn handle_ipc_command(...) -> Response {
-    let moves = state.borrow_mut().view_tag(tag);
-    apply_window_moves(&moves);  // ← Direct macOS API call
-    do_retile(...);              // ← More side effects
-    Response::Ok
-}
-```
-
-**Target architecture (Effect pattern):**
-```rust
-// Pure function - fully testable
-fn process_command(state: &mut State, cmd: Command) -> (Response, Vec<Effect>) {
+// Pure function - returns Response + Effects to execute
+fn process_command(
+    state: &mut State,
+    hotkey_manager: &mut HotkeyManager,
+    cmd: &Command,
+) -> CommandResult {
     match cmd {
-        Command::ViewTag(tag) => {
-            state.view_tag(tag);
-            let moves = state.compute_layout_changes(...);
-            (Response::Ok, vec![Effect::ApplyWindowMoves(moves), Effect::Retile])
+        Command::ViewTag { tag } => {
+            let moves = state.view_tag(*tag);
+            CommandResult::ok_with_effects(vec![
+                Effect::ApplyWindowMoves(moves),
+                Effect::Retile,
+                Effect::FocusVisibleWindowIfNeeded,
+            ])
+        }
+        // Query commands return response with no effects
+        Command::ListWindows => {
+            CommandResult::with_response(Response::Windows { windows })
         }
         ...
     }
 }
 
-// Side effects - separated
-enum Effect {
+// Side effect executor - can use MockWindowManipulator in tests
+fn execute_effects<M: WindowManipulator>(
+    effects: Vec<Effect>,
+    state: &RefCell<State>,
+    layout_engine: &RefCell<Option<LayoutEngine>>,
+    manipulator: &M,
+) -> Result<(), String>
+
+// Orchestrator
+fn handle_ipc_command<M: WindowManipulator>(...) -> Response {
+    let result = process_command(&mut state, &mut hotkey_manager, cmd);
+    execute_effects(result.effects, state, layout_engine, manipulator)?;
+    result.response
+}
+```
+
+**Effect enum (`effect.rs`):**
+```rust
+pub enum Effect {
     ApplyWindowMoves(Vec<WindowMove>),
-    ApplyLayout { display_id: DisplayId, geometries: Vec<WindowGeometry> },
-    FocusWindow { pid: i32, window_id: u32 },
-    ActivateApp { pid: i32 },
+    ApplyLayout { display_id: DisplayId, frame: Rect, geometries: Vec<WindowGeometry> },
+    FocusWindow { window_id: u32, pid: i32 },
+    MoveWindowToPosition { window_id: u32, pid: i32, x: i32, y: i32 },
+    Retile,
+    RetileDisplay(DisplayId),
+    RetileDisplays(Vec<DisplayId>),
     SendLayoutCommand { cmd: String, args: Vec<String> },
     ExecCommand(String),
+    FocusVisibleWindowIfNeeded,
+    UpdateWindowOrder { display_id: DisplayId, window_ids: Vec<u32> },
 }
-
-// Executor - can be mocked
-fn execute_effects<M: WindowManipulator>(effects: Vec<Effect>, manipulator: &M) { ... }
 ```
 
 **Benefits:**
-- `process_command()` becomes a pure function, fully testable
-- Command handling logic can be tested without macOS APIs
+- `process_command()` is a pure function, fully testable without macOS APIs
 - Effects can be inspected/verified in tests
-
-**Files to modify:**
-- New: `effect.rs` (Effect enum definition)
-- Modify: `app.rs` (split handle_ipc_command)
-- New: `platform.rs` additions (WindowManipulator trait)
+- `MockWindowManipulator` records all operations for test assertions

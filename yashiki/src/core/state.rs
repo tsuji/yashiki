@@ -5,7 +5,7 @@ use crate::platform::WindowSystem;
 use std::collections::{HashMap, HashSet};
 use yashiki_ipc::{Direction, OutputDirection};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WindowMove {
     pub window_id: WindowId,
     pub pid: i32,

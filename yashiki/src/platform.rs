@@ -1,4 +1,7 @@
-use crate::macos::{DisplayInfo, WindowInfo};
+use crate::core::{Rect, WindowMove};
+use crate::macos::{activate_application, AXUIElement, DisplayId, DisplayInfo, WindowInfo};
+use core_graphics::geometry::{CGPoint, CGSize};
+use yashiki_ipc::WindowGeometry;
 
 pub struct FocusedWindowInfo {
     pub window_id: u32,
@@ -35,6 +38,242 @@ impl WindowSystem for MacOSWindowSystem {
 }
 
 impl Default for MacOSWindowSystem {
+    fn default() -> Self {
+        Self
+    }
+}
+
+/// Trait for manipulating windows (side effects).
+/// This abstraction allows mocking in tests.
+pub trait WindowManipulator {
+    fn apply_window_moves(&self, moves: &[WindowMove]);
+    fn apply_layout(&self, display_id: DisplayId, frame: &Rect, geometries: &[WindowGeometry]);
+    fn focus_window(&self, window_id: u32, pid: i32);
+    fn move_window_to_position(&self, window_id: u32, pid: i32, x: i32, y: i32);
+    fn exec_command(&self, command: &str) -> Result<(), String>;
+}
+
+/// macOS implementation of WindowManipulator
+pub struct MacOSWindowManipulator;
+
+impl WindowManipulator for MacOSWindowManipulator {
+    fn apply_window_moves(&self, moves: &[WindowMove]) {
+        use std::collections::HashMap;
+
+        let mut by_pid: HashMap<i32, Vec<&WindowMove>> = HashMap::new();
+        for m in moves {
+            by_pid.entry(m.pid).or_default().push(m);
+        }
+
+        for (pid, pid_moves) in by_pid {
+            let app = AXUIElement::application(pid);
+            let ax_windows = match app.windows() {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
+                    continue;
+                }
+            };
+
+            for m in pid_moves {
+                let mut found = false;
+                for ax_win in &ax_windows {
+                    if let Some(wid) = ax_win.window_id() {
+                        if wid == m.window_id {
+                            let new_pos = CGPoint::new(m.new_x as f64, m.new_y as f64);
+                            if let Err(e) = ax_win.set_position(new_pos) {
+                                tracing::warn!(
+                                    "Failed to move window (id={}, pid={}, to=({}, {})): {}",
+                                    m.window_id,
+                                    m.pid,
+                                    m.new_x,
+                                    m.new_y,
+                                    e
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "Moved window (id={}, pid={}) to ({}, {})",
+                                    m.window_id,
+                                    m.pid,
+                                    m.new_x,
+                                    m.new_y
+                                );
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    tracing::warn!(
+                        "Could not find AX window for id {} (pid {})",
+                        m.window_id,
+                        m.pid
+                    );
+                }
+            }
+        }
+    }
+
+    fn apply_layout(&self, display_id: DisplayId, frame: &Rect, geometries: &[WindowGeometry]) {
+        use std::collections::HashMap;
+
+        let offset_x = frame.x;
+        let offset_y = frame.y;
+
+        // Need to get window PIDs - we'll look them up via AX
+        // Build a map of window_id -> geometry
+        let geom_map: HashMap<u32, &WindowGeometry> =
+            geometries.iter().map(|g| (g.id, g)).collect();
+
+        // Get all on-screen windows to find PIDs
+        let window_infos = crate::macos::get_on_screen_windows();
+        let mut by_pid: HashMap<i32, Vec<(u32, &WindowGeometry)>> = HashMap::new();
+        for info in &window_infos {
+            if let Some(geom) = geom_map.get(&info.window_id) {
+                by_pid
+                    .entry(info.pid)
+                    .or_default()
+                    .push((info.window_id, geom));
+            }
+        }
+
+        for (pid, windows) in by_pid {
+            let app = AXUIElement::application(pid);
+            let ax_windows = match app.windows() {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
+                    continue;
+                }
+            };
+
+            for (window_id, geom) in windows {
+                let mut found = false;
+                for ax_win in &ax_windows {
+                    if let Some(wid) = ax_win.window_id() {
+                        if wid == window_id {
+                            let new_x = geom.x + offset_x;
+                            let new_y = geom.y + offset_y;
+                            let new_pos = CGPoint::new(new_x as f64, new_y as f64);
+                            let new_size = CGSize::new(geom.width as f64, geom.height as f64);
+
+                            if let Err(e) = ax_win.set_position(new_pos) {
+                                tracing::warn!(
+                                    "Failed to set position for window {}: {}",
+                                    window_id,
+                                    e
+                                );
+                            }
+                            if let Err(e) = ax_win.set_size(new_size) {
+                                tracing::warn!(
+                                    "Failed to set size for window {}: {}",
+                                    window_id,
+                                    e
+                                );
+                            }
+
+                            tracing::debug!(
+                                "Applied layout to window {} (pid={}) on display {}: ({}, {}) {}x{}",
+                                window_id,
+                                pid,
+                                display_id,
+                                new_x,
+                                new_y,
+                                geom.width,
+                                geom.height
+                            );
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    tracing::warn!(
+                        "Could not find AX window for id {} (pid {}) when applying layout",
+                        window_id,
+                        pid
+                    );
+                }
+            }
+        }
+    }
+
+    fn focus_window(&self, window_id: u32, pid: i32) {
+        activate_application(pid);
+
+        let app = AXUIElement::application(pid);
+        let ax_windows = match app.windows() {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
+                return;
+            }
+        };
+
+        for ax_win in &ax_windows {
+            if let Some(wid) = ax_win.window_id() {
+                if wid == window_id {
+                    if let Err(e) = ax_win.raise() {
+                        tracing::warn!("Failed to raise window {}: {}", window_id, e);
+                    } else {
+                        tracing::debug!("Raised window {} (pid {})", window_id, pid);
+                    }
+                    return;
+                }
+            }
+        }
+
+        tracing::warn!(
+            "Could not find AX window for id {} (pid {})",
+            window_id,
+            pid
+        );
+    }
+
+    fn move_window_to_position(&self, window_id: u32, pid: i32, x: i32, y: i32) {
+        let app = AXUIElement::application(pid);
+        let ax_windows = match app.windows() {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
+                return;
+            }
+        };
+
+        for ax_win in &ax_windows {
+            if let Some(wid) = ax_win.window_id() {
+                if wid == window_id {
+                    let new_pos = CGPoint::new(x as f64, y as f64);
+                    if let Err(e) = ax_win.set_position(new_pos) {
+                        tracing::warn!(
+                            "Failed to move window {} to ({}, {}): {}",
+                            window_id,
+                            x,
+                            y,
+                            e
+                        );
+                    } else {
+                        tracing::info!("Moved window {} to ({}, {})", window_id, x, y);
+                    }
+                    return;
+                }
+            }
+        }
+
+        tracing::warn!(
+            "Could not find AX window for id {} (pid {})",
+            window_id,
+            pid
+        );
+    }
+
+    fn exec_command(&self, command: &str) -> Result<(), String> {
+        crate::macos::exec_command(command)
+    }
+}
+
+impl Default for MacOSWindowManipulator {
     fn default() -> Self {
         Self
     }
@@ -140,6 +379,103 @@ pub mod mock {
                 height,
             },
             layer: 0,
+        }
+    }
+
+    use std::cell::RefCell;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum RecordedOperation {
+        ApplyWindowMoves(Vec<WindowMove>),
+        ApplyLayout {
+            display_id: DisplayId,
+            frame: Rect,
+            geometries: Vec<WindowGeometry>,
+        },
+        FocusWindow {
+            window_id: u32,
+            pid: i32,
+        },
+        MoveWindowToPosition {
+            window_id: u32,
+            pid: i32,
+            x: i32,
+            y: i32,
+        },
+        ExecCommand(String),
+    }
+
+    pub struct MockWindowManipulator {
+        pub operations: RefCell<Vec<RecordedOperation>>,
+        pub exec_result: RefCell<Result<(), String>>,
+    }
+
+    impl Default for MockWindowManipulator {
+        fn default() -> Self {
+            Self {
+                operations: RefCell::new(Vec::new()),
+                exec_result: RefCell::new(Ok(())),
+            }
+        }
+    }
+
+    impl MockWindowManipulator {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn set_exec_result(&self, result: Result<(), String>) {
+            *self.exec_result.borrow_mut() = result;
+        }
+
+        pub fn get_operations(&self) -> Vec<RecordedOperation> {
+            self.operations.borrow().clone()
+        }
+
+        pub fn clear_operations(&self) {
+            self.operations.borrow_mut().clear();
+        }
+    }
+
+    impl WindowManipulator for MockWindowManipulator {
+        fn apply_window_moves(&self, moves: &[WindowMove]) {
+            self.operations
+                .borrow_mut()
+                .push(RecordedOperation::ApplyWindowMoves(moves.to_vec()));
+        }
+
+        fn apply_layout(&self, display_id: DisplayId, frame: &Rect, geometries: &[WindowGeometry]) {
+            self.operations
+                .borrow_mut()
+                .push(RecordedOperation::ApplyLayout {
+                    display_id,
+                    frame: *frame,
+                    geometries: geometries.to_vec(),
+                });
+        }
+
+        fn focus_window(&self, window_id: u32, pid: i32) {
+            self.operations
+                .borrow_mut()
+                .push(RecordedOperation::FocusWindow { window_id, pid });
+        }
+
+        fn move_window_to_position(&self, window_id: u32, pid: i32, x: i32, y: i32) {
+            self.operations
+                .borrow_mut()
+                .push(RecordedOperation::MoveWindowToPosition {
+                    window_id,
+                    pid,
+                    x,
+                    y,
+                });
+        }
+
+        fn exec_command(&self, command: &str) -> Result<(), String> {
+            self.operations
+                .borrow_mut()
+                .push(RecordedOperation::ExecCommand(command.to_string()));
+            self.exec_result.borrow().clone()
         }
     }
 }
