@@ -113,6 +113,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
             let tag: u32 = rest[0].parse()?;
             Ok(Command::ToggleViewTag { tag })
         }
+        "view-tag-last" => Ok(Command::ViewTagLast),
         "move-to-tag" => {
             if rest.is_empty() {
                 bail!("Usage: yashiki move-to-tag <tag>");

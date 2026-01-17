@@ -12,6 +12,7 @@ pub enum Command {
     // Tag operations
     ViewTag { tag: u32 },
     ToggleViewTag { tag: u32 },
+    ViewTagLast,
     MoveToTag { tag: u32 },
     ToggleWindowTag { tag: u32 },
 

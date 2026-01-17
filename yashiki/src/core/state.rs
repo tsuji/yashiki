@@ -313,6 +313,7 @@ impl State {
             disp.visible_tags.mask(),
             new_visible.mask()
         );
+        disp.previous_visible_tags = disp.visible_tags;
         disp.visible_tags = new_visible;
         self.compute_layout_changes_for_display(self.focused_display)
     }
@@ -332,7 +333,25 @@ impl State {
             disp.visible_tags.mask(),
             new_visible.mask()
         );
+        disp.previous_visible_tags = disp.visible_tags;
         disp.visible_tags = new_visible;
+        self.compute_layout_changes_for_display(self.focused_display)
+    }
+
+    pub fn view_tag_last(&mut self) -> Vec<WindowMove> {
+        let Some(disp) = self.displays.get_mut(&self.focused_display) else {
+            return vec![];
+        };
+        if disp.visible_tags == disp.previous_visible_tags {
+            return vec![];
+        }
+        tracing::info!(
+            "View tag last on display {}: {} -> {}",
+            self.focused_display,
+            disp.visible_tags.mask(),
+            disp.previous_visible_tags.mask()
+        );
+        std::mem::swap(&mut disp.visible_tags, &mut disp.previous_visible_tags);
         self.compute_layout_changes_for_display(self.focused_display)
     }
 

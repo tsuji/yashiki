@@ -340,6 +340,13 @@ fn handle_ipc_command(
             focus_visible_window_if_needed(&state);
             Response::Ok
         }
+        Command::ViewTagLast => {
+            let moves = state.borrow_mut().view_tag_last();
+            apply_window_moves(&moves);
+            do_retile(&state.borrow(), &mut layout_engine.borrow_mut());
+            focus_visible_window_if_needed(&state);
+            Response::Ok
+        }
         Command::MoveToTag { tag } => {
             let moves = state.borrow_mut().move_focused_to_tag(*tag);
             apply_window_moves(&moves);

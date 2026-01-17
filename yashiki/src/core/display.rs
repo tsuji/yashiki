@@ -6,6 +6,7 @@ pub struct Display {
     pub id: DisplayId,
     pub frame: Rect,
     pub visible_tags: Tag,
+    pub previous_visible_tags: Tag,
 }
 
 impl Display {
@@ -14,6 +15,7 @@ impl Display {
             id,
             frame,
             visible_tags: Tag::new(1),
+            previous_visible_tags: Tag::new(1),
         }
     }
 }

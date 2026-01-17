@@ -36,8 +36,9 @@ Future components:
 
 Like AeroSpace, uses virtual workspaces instead of macOS native Spaces:
 - All windows exist on a single macOS Space
-- Workspace switching moves windows off-screen (x = -10000) or shows them
+- Workspace switching hides windows AeroSpace-style (position window's top-left at screen's bottom-right corner)
 - Only uses public Accessibility API
+- Uses NSScreen visibleFrame (excludes menu bar and dock) for accurate layout area
 
 ## Key Features
 
@@ -85,6 +86,7 @@ yashiki unbind alt-1              # Unbind hotkey
 yashiki list-bindings             # List all bindings
 yashiki view-tag 1                # Switch to tag 1
 yashiki toggle-view-tag 2         # Toggle tag 2 visibility
+yashiki view-tag-last             # Switch to previous tag
 yashiki move-to-tag 1             # Move focused window to tag 1
 yashiki focus-window next         # Focus next window
 yashiki focus-window prev         # Focus previous window
@@ -118,6 +120,11 @@ yashiki bind alt-period layout-cmd dec-main-count
 yashiki bind alt-h layout-cmd set-main-ratio 0.5
 yashiki bind alt-o focus-output next
 yashiki bind alt-shift-o send-to-output next
+
+# Gap configuration
+yashiki layout-cmd set-inner-gap 10
+yashiki layout-cmd set-outer-gap 10
+yashiki layout-cmd set-smart-gaps off
 ```
 
 ## Implementation Status
@@ -126,7 +133,7 @@ yashiki bind alt-shift-o send-to-output next
 - **macos/accessibility.rs** - AXUIElement FFI bindings
   - Permission check, window manipulation (position, size), `raise()` for focus
 - **macos/display.rs** - CGWindowList window enumeration, display info
-  - `get_on_screen_windows()`, `get_all_displays()`
+  - `get_on_screen_windows()`, `get_all_displays()` (uses NSScreen visibleFrame)
 - **macos/observer.rs** - AXObserver for window events
 - **macos/workspace.rs** - NSWorkspace app launch/terminate notifications, `activate_application()`
 - **macos/hotkey.rs** - CGEventTap global hotkeys
@@ -152,8 +159,12 @@ yashiki bind alt-shift-o send-to-output next
 
 ### tatami (layout engine)
 - Master-stack layout
-- Internal state: main_count, main_ratio
-- Commands: `set-main-ratio`, `inc-main-count`, `dec-main-count`, `set-main-count`
+- Internal state: main_count, main_ratio, inner_gap, outer_gap, smart_gaps
+- Commands:
+  - `set-main-ratio <0.1-0.9>`, `inc-main-count`, `dec-main-count`, `set-main-count <n>`
+  - `set-inner-gap <px>`, `set-outer-gap <px>` - gap between windows / screen edges
+  - `inc-inner-gap [delta]`, `dec-inner-gap [delta]`, `inc-outer-gap [delta]`, `dec-outer-gap [delta]`
+  - `set-smart-gaps <on|off>` - disable gaps when only one window (default: on)
 
 ### Not Yet Implemented
 - `SwapWindow` command (swap positions with window in direction)
@@ -171,6 +182,7 @@ yashiki bind alt-shift-o send-to-output next
 Key crates:
 - `core-foundation` (0.10) - macOS Core Foundation bindings
 - `core-graphics` (0.25) - CGWindowList, CGEventTap, display info
+- `objc2`, `objc2-app-kit`, `objc2-foundation` - NSScreen, NSWorkspace bindings
 - `tokio` - async runtime for IPC server
 - `dirs` - config directory location
 
@@ -211,3 +223,10 @@ Focus involves: `activate_application(pid)` then `AXUIElement.raise()`
 - Layout applied independently per display with display offset
 - `focus_output`: cycles displays by sorted ID, focuses first visible window on target
 - `send_to_output`: moves window to target display, updates `focused_display`, retiles both displays
+
+### Window Hiding (AeroSpace-style)
+- Hidden windows are moved to screen's bottom-right corner (top-left of window at bottom-right of screen)
+- Window size is preserved (no resize to 1x1)
+- `Window.saved_frame` stores original position when hidden
+- `Window.is_hidden()` returns true when `saved_frame.is_some()`
+- macOS clamps window positions, so left-edge hiding (-10000) doesn't work reliably
