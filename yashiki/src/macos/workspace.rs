@@ -6,6 +6,13 @@ use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProto
 use std::cell::RefCell;
 use std::sync::mpsc as std_mpsc;
 
+pub fn get_frontmost_app_pid() -> Option<i32> {
+    let workspace = NSWorkspace::sharedWorkspace();
+    workspace
+        .frontmostApplication()
+        .map(|app| app.processIdentifier())
+}
+
 #[allow(deprecated)]
 pub fn activate_application(pid: i32) -> bool {
     let workspace = NSWorkspace::sharedWorkspace();

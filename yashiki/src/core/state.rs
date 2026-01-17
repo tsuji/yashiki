@@ -84,56 +84,58 @@ impl State {
     }
 
     pub fn sync_focused_window(&mut self) {
-        let focused_window = match get_focused_window() {
-            Ok(win) => win,
-            Err(_) => {
-                self.set_focused(None);
-                return;
-            }
-        };
+        self.sync_focused_window_with_hint(None);
+    }
 
-        let pid = match focused_window.pid() {
-            Ok(pid) => pid,
-            Err(_) => {
-                self.set_focused(None);
-                return;
+    /// Sync focused window, with optional PID hint for fallback when accessibility API fails
+    /// (common with Electron apps like Microsoft Teams)
+    pub fn sync_focused_window_with_hint(&mut self, pid_hint: Option<i32>) {
+        // Try the normal accessibility API first
+        if let Ok(focused_window) = get_focused_window() {
+            if let Some(window_id) = focused_window.window_id() {
+                if let Some(window) = self.windows.get(&window_id) {
+                    let display_id = window.display_id;
+                    self.set_focused(Some(window_id));
+                    if self.focused_display != display_id {
+                        tracing::info!(
+                            "Focused display changed: {} -> {}",
+                            self.focused_display,
+                            display_id
+                        );
+                        self.focused_display = display_id;
+                    }
+                    return;
+                }
             }
-        };
-
-        let position = focused_window.position().ok();
-        let size = focused_window.size().ok();
-
-        // Find matching window by PID and bounds
-        let window = self.windows.values().find(|w| {
-            if w.pid != pid {
-                return false;
-            }
-            if let (Some(pos), Some(sz)) = (&position, &size) {
-                let x_match = (w.frame.x - pos.x as i32).abs() <= 1;
-                let y_match = (w.frame.y - pos.y as i32).abs() <= 1;
-                let w_match = (w.frame.width as i32 - sz.width as i32).abs() <= 1;
-                let h_match = (w.frame.height as i32 - sz.height as i32).abs() <= 1;
-                x_match && y_match && w_match && h_match
-            } else {
-                true
-            }
-        });
-
-        if let Some(window) = window {
-            let window_id = window.id;
-            let display_id = window.display_id;
-            self.set_focused(Some(window_id));
-            if self.focused_display != display_id {
-                tracing::info!(
-                    "Focused display changed: {} -> {}",
-                    self.focused_display,
-                    display_id
-                );
-                self.focused_display = display_id;
-            }
-        } else {
-            self.set_focused(None);
         }
+
+        // Fallback: if we have a PID hint (from ApplicationActivated event),
+        // find a visible window for that PID
+        if let Some(pid) = pid_hint {
+            let visible_tags = self.visible_tags();
+            let pid_windows: Vec<_> = self
+                .windows
+                .values()
+                .filter(|w| w.pid == pid && w.tags.intersects(visible_tags) && !w.is_hidden())
+                .collect();
+
+            if let Some(window) = pid_windows.first() {
+                tracing::debug!(
+                    "Focus fallback: using window {} for pid {} (accessibility API unavailable)",
+                    window.id,
+                    pid
+                );
+                let window_id = window.id;
+                let display_id = window.display_id;
+                self.set_focused(Some(window_id));
+                if self.focused_display != display_id {
+                    self.focused_display = display_id;
+                }
+                return;
+            }
+        }
+
+        self.set_focused(None);
     }
 
     /// Sync windows for a specific PID. Returns true if window count changed.
@@ -251,8 +253,12 @@ impl State {
                 self.sync_pid(*pid);
                 false
             }
-            Event::FocusedWindowChanged { .. } | Event::ApplicationActivated { .. } => {
+            Event::FocusedWindowChanged { .. } => {
                 self.sync_focused_window();
+                false
+            }
+            Event::ApplicationActivated { pid } => {
+                self.sync_focused_window_with_hint(Some(*pid));
                 false
             }
             Event::ApplicationDeactivated { .. }

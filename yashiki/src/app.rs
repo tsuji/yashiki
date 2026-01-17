@@ -569,12 +569,7 @@ fn retile_single_display(
     }
 }
 
-fn move_window_to_position(pid: i32, window_id: u32, state: &State, x: i32, y: i32) {
-    let window = match state.windows.get(&window_id) {
-        Some(w) => w,
-        None => return,
-    };
-
+fn move_window_to_position(pid: i32, window_id: u32, _state: &State, x: i32, y: i32) {
     let app = AXUIElement::application(pid);
     let ax_windows = match app.windows() {
         Ok(w) => w,
@@ -584,106 +579,63 @@ fn move_window_to_position(pid: i32, window_id: u32, state: &State, x: i32, y: i
         }
     };
 
-    // Find matching AX window by current position
+    // Find matching AX window by window_id
     for ax_win in &ax_windows {
-        let pos = match ax_win.position() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let size = match ax_win.size() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        // Use stored frame (before moving)
-        let old_x = window.frame.x as f64 - (x as f64 - window.frame.x as f64);
-        let old_y = window.frame.y as f64 - (y as f64 - window.frame.y as f64);
-
-        let pos_match = (pos.x - old_x).abs() < 10.0 && (pos.y - old_y).abs() < 10.0;
-        let size_match = (size.width - window.frame.width as f64).abs() < 10.0
-            && (size.height - window.frame.height as f64).abs() < 10.0;
-
-        if pos_match || size_match {
-            let new_pos = CGPoint::new(x as f64, y as f64);
-            if let Err(e) = ax_win.set_position(new_pos) {
-                tracing::warn!(
-                    "Failed to move window {} to ({}, {}): {}",
-                    window_id,
-                    x,
-                    y,
-                    e
-                );
-            } else {
-                tracing::info!("Moved window {} to ({}, {})", window_id, x, y);
+        if let Some(wid) = ax_win.window_id() {
+            if wid == window_id {
+                let new_pos = CGPoint::new(x as f64, y as f64);
+                if let Err(e) = ax_win.set_position(new_pos) {
+                    tracing::warn!(
+                        "Failed to move window {} to ({}, {}): {}",
+                        window_id,
+                        x,
+                        y,
+                        e
+                    );
+                } else {
+                    tracing::info!("Moved window {} to ({}, {})", window_id, x, y);
+                }
+                return;
             }
-            return;
-        }
-    }
-
-    // Fallback: move first window
-    if let Some(ax_win) = ax_windows.first() {
-        let new_pos = CGPoint::new(x as f64, y as f64);
-        if let Err(e) = ax_win.set_position(new_pos) {
-            tracing::warn!(
-                "Failed to move window {} to ({}, {}): {}",
-                window_id,
-                x,
-                y,
-                e
-            );
-        } else {
-            tracing::info!("Moved window {} to ({}, {}) (fallback)", window_id, x, y);
-        }
-    }
-}
-
-fn focus_window_by_id(state: &State, window_id: u32, pid: i32) {
-    // Activate the application first
-    activate_application(pid);
-
-    // Get the target window's position/size for matching
-    let window = match state.windows.get(&window_id) {
-        Some(w) => w,
-        None => return,
-    };
-
-    // Get AX windows and find the matching one
-    let app = AXUIElement::application(pid);
-    let ax_windows = match app.windows() {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
-            return;
-        }
-    };
-
-    for ax_win in &ax_windows {
-        let pos = match ax_win.position() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let size = match ax_win.size() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        let pos_match = (pos.x - window.frame.x as f64).abs() < 10.0
-            && (pos.y - window.frame.y as f64).abs() < 10.0;
-        let size_match = (size.width - window.frame.width as f64).abs() < 10.0
-            && (size.height - window.frame.height as f64).abs() < 10.0;
-
-        if pos_match && size_match {
-            if let Err(e) = ax_win.raise() {
-                tracing::warn!("Failed to raise window {}: {}", window_id, e);
-            } else {
-                tracing::debug!("Raised window {} (pid {})", window_id, pid);
-            }
-            return;
         }
     }
 
     tracing::warn!(
-        "Could not find matching AX window for id {} (pid {})",
+        "Could not find AX window for id {} (pid {})",
+        window_id,
+        pid
+    );
+}
+
+fn focus_window_by_id(_state: &State, window_id: u32, pid: i32) {
+    // Activate the application first
+    activate_application(pid);
+
+    // Get AX windows and find the matching one by window_id
+    let app = AXUIElement::application(pid);
+    let ax_windows = match app.windows() {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
+            return;
+        }
+    };
+
+    for ax_win in &ax_windows {
+        if let Some(wid) = ax_win.window_id() {
+            if wid == window_id {
+                if let Err(e) = ax_win.raise() {
+                    tracing::warn!("Failed to raise window {}: {}", window_id, e);
+                } else {
+                    tracing::debug!("Raised window {} (pid {})", window_id, pid);
+                }
+                return;
+            }
+        }
+    }
+
+    tracing::warn!(
+        "Could not find AX window for id {} (pid {})",
         window_id,
         pid
     );
@@ -735,41 +687,41 @@ fn apply_window_moves(moves: &[WindowMove]) {
         };
 
         for m in pid_moves {
-            // Find matching AX window by current position
+            // Find matching AX window by window_id
+            let mut found = false;
             for ax_win in &ax_windows {
-                let pos = match ax_win.position() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-
-                // Match by approximate position (old position)
-                let pos_match =
-                    (pos.x - m.old_x as f64).abs() < 10.0 && (pos.y - m.old_y as f64).abs() < 10.0;
-
-                if pos_match {
-                    let new_pos = CGPoint::new(m.new_x as f64, m.new_y as f64);
-                    if let Err(e) = ax_win.set_position(new_pos) {
-                        tracing::warn!(
-                            "Failed to move window (pid={}, from=({}, {}), to=({}, {})): {}",
-                            m.pid,
-                            m.old_x,
-                            m.old_y,
-                            m.new_x,
-                            m.new_y,
-                            e
-                        );
-                    } else {
-                        tracing::debug!(
-                            "Moved window (pid={}) from ({}, {}) to ({}, {})",
-                            m.pid,
-                            m.old_x,
-                            m.old_y,
-                            m.new_x,
-                            m.new_y
-                        );
+                if let Some(wid) = ax_win.window_id() {
+                    if wid == m.window_id {
+                        let new_pos = CGPoint::new(m.new_x as f64, m.new_y as f64);
+                        if let Err(e) = ax_win.set_position(new_pos) {
+                            tracing::warn!(
+                                "Failed to move window (id={}, pid={}, to=({}, {})): {}",
+                                m.window_id,
+                                m.pid,
+                                m.new_x,
+                                m.new_y,
+                                e
+                            );
+                        } else {
+                            tracing::debug!(
+                                "Moved window (id={}, pid={}) to ({}, {})",
+                                m.window_id,
+                                m.pid,
+                                m.new_x,
+                                m.new_y
+                            );
+                        }
+                        found = true;
+                        break;
                     }
-                    break;
                 }
+            }
+            if !found {
+                tracing::warn!(
+                    "Could not find AX window for id {} (pid {})",
+                    m.window_id,
+                    m.pid
+                );
             }
         }
     }
@@ -787,7 +739,7 @@ fn apply_layout_on_display(
     let offset_x = frame.x;
     let offset_y = frame.y;
 
-    // Build a map of window_id -> (pid, geometry)
+    // Build a map of pid -> [(window_id, geometry)]
     let mut by_pid: HashMap<i32, Vec<(u32, &WindowGeometry)>> = HashMap::new();
     for geom in geometries {
         if let Some(window) = state.windows.get(&geom.id) {
@@ -806,25 +758,11 @@ fn apply_layout_on_display(
         };
 
         for (window_id, geom) in windows {
-            // Find matching AX window by current position/size
-            if let Some(window) = state.windows.get(&window_id) {
-                for ax_win in &ax_windows {
-                    // Match by approximate position
-                    let pos = match ax_win.position() {
-                        Ok(p) => p,
-                        Err(_) => continue,
-                    };
-                    let size = match ax_win.size() {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-
-                    let pos_match = (pos.x - window.frame.x as f64).abs() < 10.0
-                        && (pos.y - window.frame.y as f64).abs() < 10.0;
-                    let size_match = (size.width - window.frame.width as f64).abs() < 10.0
-                        && (size.height - window.frame.height as f64).abs() < 10.0;
-
-                    if pos_match && size_match {
+            // Find matching AX window by window_id
+            let mut found = false;
+            for ax_win in &ax_windows {
+                if let Some(wid) = ax_win.window_id() {
+                    if wid == window_id {
                         // Apply new geometry with display offset
                         let new_x = geom.x as i32 + offset_x;
                         let new_y = geom.y as i32 + offset_y;
@@ -852,9 +790,17 @@ fn apply_layout_on_display(
                             geom.width,
                             geom.height
                         );
+                        found = true;
                         break;
                     }
                 }
+            }
+            if !found {
+                tracing::warn!(
+                    "Could not find AX window for id {} (pid {}) when applying layout",
+                    window_id,
+                    pid
+                );
             }
         }
     }

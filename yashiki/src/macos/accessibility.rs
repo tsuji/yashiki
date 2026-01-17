@@ -78,6 +78,9 @@ extern "C" {
         notification: CFStringRef,
     ) -> AXError;
     fn AXObserverGetRunLoopSource(observer: AXObserverRef) -> *mut c_void;
+
+    // Private API to get CGWindowID from AXUIElement
+    fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> AXError;
 }
 
 const AX_VALUE_TYPE_CGPOINT: u32 = 1;
@@ -146,6 +149,16 @@ impl AXUIElement {
             Ok(pid)
         } else {
             Err(err)
+        }
+    }
+
+    pub fn window_id(&self) -> Option<u32> {
+        let mut wid: u32 = 0;
+        let err = unsafe { _AXUIElementGetWindow(self.as_concrete_TypeRef(), &mut wid) };
+        if err == AX_ERROR_SUCCESS {
+            Some(wid)
+        } else {
+            None
         }
     }
 
@@ -362,10 +375,23 @@ impl AXObserver {
 }
 
 pub fn get_focused_window() -> Result<AXUIElement, AXError> {
-    // Warm up the accessibility system by calling CGWindowList first.
-    // Without this, AXFocusedApplication may fail with -25204 (kAXErrorCannotComplete).
-    let _ = super::display::get_on_screen_windows();
+    // Use NSWorkspace as primary method (more robust for Electron apps like Teams)
+    if let Some(pid) = super::workspace::get_frontmost_app_pid() {
+        let app = AXUIElement::application(pid);
+        match app.focused_window() {
+            Ok(win) => return Ok(win),
+            Err(e) => {
+                tracing::debug!(
+                    "focused_window via NSWorkspace failed for pid {}: {}",
+                    pid,
+                    e
+                );
+            }
+        }
+    }
 
+    // Fallback: use accessibility API directly
+    let _ = super::display::get_on_screen_windows();
     let system = AXUIElement::system_wide();
     let app = match system.focused_application() {
         Ok(app) => app,
