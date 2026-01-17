@@ -6,7 +6,6 @@ use core_graphics::window::{
     CGWindowListCopyWindowInfo,
 };
 use std::collections::HashSet;
-use std::ffi::c_void;
 
 #[derive(Debug, Clone)]
 pub struct WindowInfo {

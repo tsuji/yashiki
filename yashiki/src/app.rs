@@ -1,3 +1,4 @@
+use crate::core::State;
 use crate::event::{Command, Event};
 use crate::macos;
 use crate::macos::{ObserverManager, WorkspaceEvent, WorkspaceWatcher};
@@ -14,6 +15,7 @@ struct RunLoopContext {
     workspace_event_rx: std_mpsc::Receiver<WorkspaceEvent>,
     event_tx: mpsc::Sender<Event>,
     observer_manager: RefCell<ObserverManager>,
+    state: RefCell<State>,
 }
 
 pub struct App {}
@@ -80,6 +82,10 @@ impl App {
         let (workspace_event_tx, workspace_event_rx) = std_mpsc::channel::<WorkspaceEvent>();
         let _workspace_watcher = WorkspaceWatcher::new(workspace_event_tx, mtm);
 
+        // Initialize state with current windows
+        let mut state = State::new();
+        state.sync_all();
+
         // Set up a timer to check for commands and events periodically
         let context = Box::new(RunLoopContext {
             cmd_rx,
@@ -87,6 +93,7 @@ impl App {
             workspace_event_rx,
             event_tx,
             observer_manager: RefCell::new(observer_manager),
+            state: RefCell::new(state),
         });
         let mut timer_context = core_foundation::runloop::CFRunLoopTimerContext {
             version: 0,
@@ -146,8 +153,9 @@ impl App {
                 }
             }
 
-            // Forward observer events to tokio
+            // Process observer events and forward to tokio
             while let Ok(event) = ctx.observer_event_rx.try_recv() {
+                ctx.state.borrow_mut().handle_event(&event);
                 if ctx.event_tx.blocking_send(event).is_err() {
                     tracing::error!("Failed to forward event to tokio");
                 }
