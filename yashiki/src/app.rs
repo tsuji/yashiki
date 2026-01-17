@@ -260,8 +260,11 @@ impl App {
                     needs_retile = true;
                 }
 
-                // On external focus change, switch tag if focused window is hidden
+                // On external focus change, notify layout engine and switch tag if focused window is hidden
                 if is_focus_event {
+                    if let Some(focused_id) = ctx.state.borrow().focused {
+                        notify_layout_focus(&ctx.layout_engine, focused_id);
+                    }
                     let moves = {
                         let mut engine = ctx.layout_engine.borrow_mut();
                         switch_tag_for_focused_window(&ctx.state, &mut *engine)
@@ -496,19 +499,6 @@ fn process_command(
             Effect::Retile,
         ]),
         Command::Retile => CommandResult::ok_with_effects(vec![Effect::Retile]),
-        Command::Zoom => {
-            if let Some(window_id) = state.focused {
-                CommandResult::ok_with_effects(vec![
-                    Effect::SendLayoutCommand {
-                        cmd: "zoom".to_string(),
-                        args: vec![window_id.to_string()],
-                    },
-                    Effect::Retile,
-                ])
-            } else {
-                CommandResult::error("No focused window")
-            }
-        }
 
         // Exec commands
         Command::Exec { command } => {
@@ -597,6 +587,7 @@ fn execute_effects<M: WindowManipulator>(
             }
             Effect::FocusWindow { window_id, pid } => {
                 manipulator.focus_window(window_id, pid);
+                notify_layout_focus(layout_engine, window_id);
             }
             Effect::MoveWindowToPosition {
                 window_id,
@@ -802,6 +793,15 @@ fn switch_tag_for_focused_window(
     let moves = state.borrow_mut().view_tag(tag);
     // Note: Retiling is handled by the caller after applying moves
     Some(moves)
+}
+
+fn notify_layout_focus(layout_engine: &RefCell<Option<LayoutEngine>>, window_id: u32) {
+    let mut engine = layout_engine.borrow_mut();
+    if let Some(ref mut engine) = *engine {
+        if let Err(e) = engine.send_command("focus-changed", &[window_id.to_string()]) {
+            tracing::warn!("Failed to notify layout engine of focus change: {}", e);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1010,36 +1010,6 @@ mod tests {
         assert!(matches!(result.response, Response::Ok));
         assert_eq!(result.effects.len(), 1);
         assert!(matches!(result.effects[0], Effect::Retile));
-    }
-
-    #[test]
-    fn test_zoom_without_focused_window_returns_error() {
-        let (mut state, mut hotkey_manager) = setup_state();
-        state.focused = None;
-
-        let result = process_command(&mut state, &mut hotkey_manager, &Command::Zoom);
-
-        assert!(matches!(result.response, Response::Error { .. }));
-        assert!(result.effects.is_empty());
-    }
-
-    #[test]
-    fn test_zoom_with_focused_window_produces_effects() {
-        let (mut state, mut hotkey_manager) = setup_state();
-
-        let result = process_command(&mut state, &mut hotkey_manager, &Command::Zoom);
-
-        assert!(matches!(result.response, Response::Ok));
-        assert_eq!(result.effects.len(), 2);
-
-        match &result.effects[0] {
-            Effect::SendLayoutCommand { cmd, args } => {
-                assert_eq!(cmd, "zoom");
-                assert_eq!(args, &vec!["100".to_string()]); // Focused window ID
-            }
-            _ => panic!("Expected SendLayoutCommand effect"),
-        }
-        assert!(matches!(result.effects[1], Effect::Retile));
     }
 
     #[test]

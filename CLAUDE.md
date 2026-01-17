@@ -7,12 +7,14 @@ macOS tiling window manager written in Rust.
 ```
 yashiki/                  # WM core daemon + CLI
 yashiki-ipc/              # Shared protocol definitions (commands, layout)
-yashiki-layout-tatami/    # Default tile layout engine (master-stack)
+yashiki-layout-tatami/    # Tile layout engine (master-stack)
+yashiki-layout-byobu/     # Accordion layout engine (stacked windows)
 ```
 
 Future components:
 - `engawa/` - Status bar
 - Other layout engines: `yashiki-layout-rasen` (spiral), `yashiki-layout-koushi` (grid)
+- Per-tag layout engine switching (like river)
 
 Layout engine naming convention: `yashiki-layout-<name>` (e.g., `yashiki-layout-tatami`)
 
@@ -79,6 +81,14 @@ enum LayoutResult {
 }
 ```
 
+### Focus Notification
+
+yashiki automatically sends `focus-changed <window_id>` to the layout engine when focus changes.
+This allows layout engines to track the focused window without explicit user commands.
+
+- **tatami**: Uses for `zoom` command (zoom without args uses focused window)
+- **byobu**: Uses to determine which window to show on top
+
 ## CLI Usage
 
 ```sh
@@ -102,6 +112,8 @@ yashiki send-to-output prev       # Move focused window to previous display
 yashiki retile                    # Apply layout
 yashiki layout-cmd set-main-ratio 0.6   # Send command to layout engine
 yashiki layout-cmd inc-main-count       # Increase main window count
+yashiki layout-cmd zoom                 # Move focused window to main area (tatami)
+yashiki layout-cmd zoom 123             # Move specific window to main area (tatami)
 yashiki list-windows              # List all windows
 yashiki get-state                 # Get current state
 yashiki exec "open -a Safari"     # Execute shell command
@@ -177,13 +189,25 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 
 ### yashiki-layout-tatami (layout engine)
 - Master-stack layout
-- Internal state: main_count, main_ratio, inner_gap, outer_gap, smart_gaps
+- Internal state: main_count, main_ratio, inner_gap, outer_gap, smart_gaps, focused_window_id, main_window_id
 - Commands:
+  - `focus-changed <window_id>` - notification from yashiki (automatic)
+  - `zoom [window_id]` - set main window (uses focused window if id omitted)
   - `set-main-ratio <0.1-0.9>`, `inc-main-ratio [delta]`, `dec-main-ratio [delta]` (default delta: 0.05)
   - `inc-main-count`, `dec-main-count`, `set-main-count <n>`
   - `set-inner-gap <px>`, `set-outer-gap <px>` - gap between windows / screen edges
   - `inc-inner-gap [delta]`, `dec-inner-gap [delta]`, `inc-outer-gap [delta]`, `dec-outer-gap [delta]`
   - `set-smart-gaps <on|off>` - disable gaps when only one window (default: on)
+
+### yashiki-layout-byobu (layout engine)
+- Accordion layout (AeroSpace-style)
+- All windows stacked at same position, focused window on top
+- Padding reveals edges of adjacent windows
+- Internal state: padding, orientation, focused_window_id
+- Commands:
+  - `focus-changed <window_id>` - notification from yashiki (automatic)
+  - `set-padding <px>`, `inc-padding [delta]`, `dec-padding [delta]` (default: 30px, delta: 5px)
+  - `set-orientation <horizontal|h|vertical|v>`, `toggle-orientation`
 
 ### Not Yet Implemented
 - `SwapWindow` command (swap positions with window in direction)
@@ -266,7 +290,7 @@ Focus involves: `activate_application(pid)` then `AXUIElement.raise()`
 
 ## Testing
 
-### Current Test Coverage (63 tests)
+### Current Test Coverage (68 tests)
 
 Run tests: `cargo test --all`
 
@@ -275,7 +299,8 @@ Run tests: `cargo test --all`
 - `macos/hotkey.rs` - `parse_hotkey()`, `format_hotkey()` (15 tests)
 - `yashiki-ipc` - Command/Response/LayoutMessage serialization (17 tests)
 - `core/state.rs` - State management with MockWindowSystem (13 tests)
-- `app.rs` - `process_command()` effect generation (11 tests)
+- `app.rs` - `process_command()` effect generation (9 tests)
+- `yashiki-layout-byobu` - Accordion layout and commands (7 tests)
 
 ### Platform Abstraction Layer
 

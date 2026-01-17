@@ -38,7 +38,6 @@ enum SubCommand {
     ToggleWindowTag(ToggleWindowTagCmd),
     FocusWindow(FocusWindowCmd),
     SwapWindow(SwapWindowCmd),
-    Zoom(ZoomCmd),
     FocusOutput(FocusOutputCmd),
     SendToOutput(SendToOutputCmd),
     Retile(RetileCmd),
@@ -145,11 +144,6 @@ struct SwapWindowCmd {
     #[argh(positional)]
     direction: String,
 }
-
-/// Toggle zoom on focused window
-#[derive(FromArgs)]
-#[argh(subcommand, name = "zoom")]
-struct ZoomCmd {}
 
 /// Focus the next or previous display
 #[derive(FromArgs)]
@@ -336,7 +330,6 @@ fn to_command(subcmd: SubCommand) -> Result<Command> {
         SubCommand::SwapWindow(cmd) => Ok(Command::SwapWindow {
             direction: parse_direction(&cmd.direction)?,
         }),
-        SubCommand::Zoom(_) => Ok(Command::Zoom),
         SubCommand::FocusOutput(cmd) => Ok(Command::FocusOutput {
             direction: parse_output_direction(&cmd.direction)?,
         }),
@@ -434,7 +427,6 @@ fn parse_command(args: &[String]) -> Result<Command> {
             let direction = parse_direction(&rest[0])?;
             Ok(Command::SwapWindow { direction })
         }
-        "zoom" => Ok(Command::Zoom),
         "focus-output" => {
             if rest.is_empty() {
                 bail!("Usage: focus-output <next|prev>");

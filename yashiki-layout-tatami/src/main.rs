@@ -9,6 +9,7 @@ struct LayoutState {
     outer_gap: u32,
     smart_gaps: bool,
     main_window_id: Option<u32>,
+    focused_window_id: Option<u32>,
 }
 
 impl Default for LayoutState {
@@ -20,6 +21,7 @@ impl Default for LayoutState {
             outer_gap: 0,
             smart_gaps: true,
             main_window_id: None,
+            focused_window_id: None,
         }
     }
 }
@@ -175,13 +177,28 @@ fn handle_command(state: &mut LayoutState, cmd: &str, args: &[String]) -> Layout
                 message: "invalid value (use on/off)".to_string(),
             }
         }
-        "zoom" => {
+        "focus-changed" => {
             if let Some(id) = args.first().and_then(|s| s.parse::<u32>().ok()) {
+                state.focused_window_id = Some(id);
+                LayoutResult::Ok
+            } else {
+                LayoutResult::Error {
+                    message: "usage: focus-changed <window_id>".to_string(),
+                }
+            }
+        }
+        "zoom" => {
+            let id = args
+                .first()
+                .and_then(|s| s.parse::<u32>().ok())
+                .or(state.focused_window_id);
+            if let Some(id) = id {
                 state.main_window_id = Some(id);
                 LayoutResult::Ok
             } else {
                 LayoutResult::Error {
-                    message: "usage: zoom <window_id>".to_string(),
+                    message: "no window to zoom (use: zoom <window_id> or focus a window first)"
+                        .to_string(),
                 }
             }
         }

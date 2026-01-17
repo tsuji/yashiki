@@ -6,7 +6,6 @@ pub enum Command {
     // Window operations
     FocusWindow { direction: Direction },
     SwapWindow { direction: Direction },
-    Zoom,
     CloseWindow,
     ToggleFloat,
 
