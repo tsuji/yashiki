@@ -206,11 +206,17 @@ impl App {
             }
 
             // Process observer events and forward to tokio
+            let mut needs_retile = false;
             while let Ok(event) = ctx.observer_event_rx.try_recv() {
-                ctx.state.borrow_mut().handle_event(&event);
+                if ctx.state.borrow_mut().handle_event(&event) {
+                    needs_retile = true;
+                }
                 if ctx.event_tx.blocking_send(event).is_err() {
                     tracing::error!("Failed to forward event to tokio");
                 }
+            }
+            if needs_retile {
+                do_retile(&ctx.state.borrow(), &mut ctx.layout_engine.borrow_mut());
             }
         }
 
@@ -349,37 +355,8 @@ fn handle_ipc_command(
             }
         }
         Command::Retile => {
-            let state = state.borrow();
-            let mut engine = layout_engine.borrow_mut();
-            if let Some(ref mut engine) = *engine {
-                // Get visible windows
-                let visible_windows: Vec<_> = state
-                    .windows
-                    .values()
-                    .filter(|w| w.tags.intersects(state.visible_tags) && !w.is_offscreen())
-                    .collect();
-
-                if visible_windows.is_empty() {
-                    return Response::Ok;
-                }
-
-                let window_ids: Vec<u32> = visible_windows.iter().map(|w| w.id).collect();
-                let (width, height) = get_main_display_size();
-
-                match engine.request_layout(width, height, &window_ids) {
-                    Ok(geometries) => {
-                        apply_layout(&state, &geometries);
-                        Response::Ok
-                    }
-                    Err(e) => Response::Error {
-                        message: format!("Layout request failed: {}", e),
-                    },
-                }
-            } else {
-                Response::Error {
-                    message: "No layout engine available".to_string(),
-                }
-            }
+            do_retile(&state.borrow(), &mut layout_engine.borrow_mut());
+            Response::Ok
         }
         Command::Bind { key, action } => {
             let mut manager = hotkey_manager.borrow_mut();
@@ -424,6 +401,34 @@ fn handle_ipc_command(
             Response::Error {
                 message: "Command not yet implemented".to_string(),
             }
+        }
+    }
+}
+
+fn do_retile(state: &State, layout_engine: &mut Option<LayoutEngine>) {
+    let Some(ref mut engine) = layout_engine else {
+        return;
+    };
+
+    let visible_windows: Vec<_> = state
+        .windows
+        .values()
+        .filter(|w| w.tags.intersects(state.visible_tags) && !w.is_offscreen())
+        .collect();
+
+    if visible_windows.is_empty() {
+        return;
+    }
+
+    let window_ids: Vec<u32> = visible_windows.iter().map(|w| w.id).collect();
+    let (width, height) = get_main_display_size();
+
+    match engine.request_layout(width, height, &window_ids) {
+        Ok(geometries) => {
+            apply_layout(state, &geometries);
+        }
+        Err(e) => {
+            tracing::error!("Layout request failed: {}", e);
         }
     }
 }

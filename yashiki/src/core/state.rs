@@ -90,7 +90,8 @@ impl State {
         self.set_focused(window_id);
     }
 
-    pub fn sync_pid(&mut self, pid: i32) {
+    /// Sync windows for a specific PID. Returns true if window count changed.
+    pub fn sync_pid(&mut self, pid: i32) -> bool {
         let window_infos = get_on_screen_windows();
         let pid_window_infos: Vec<_> = window_infos.iter().filter(|w| w.pid == pid).collect();
 
@@ -102,6 +103,8 @@ impl State {
             .collect();
         let new_ids: HashSet<WindowId> = pid_window_infos.iter().map(|w| w.window_id).collect();
 
+        let mut changed = false;
+
         // Remove windows that no longer exist
         for id in current_ids.difference(&new_ids) {
             if let Some(window) = self.windows.remove(id) {
@@ -111,6 +114,7 @@ impl State {
                     window.title,
                     window.app_name
                 );
+                changed = true;
             }
         }
 
@@ -125,6 +129,7 @@ impl State {
                     window.app_name
                 );
                 self.windows.insert(window.id, window);
+                changed = true;
             }
         }
 
@@ -154,24 +159,28 @@ impl State {
                 }
             }
         }
+
+        changed
     }
 
-    pub fn handle_event(&mut self, event: &Event) {
+    /// Handle an event. Returns true if window count changed (needs retile).
+    pub fn handle_event(&mut self, event: &Event) -> bool {
         match event {
-            Event::WindowCreated { pid }
-            | Event::WindowDestroyed { pid }
-            | Event::WindowMoved { pid }
+            Event::WindowCreated { pid } | Event::WindowDestroyed { pid } => self.sync_pid(*pid),
+            Event::WindowMoved { pid }
             | Event::WindowResized { pid }
             | Event::WindowMiniaturized { pid }
             | Event::WindowDeminiaturized { pid } => {
                 self.sync_pid(*pid);
+                false
             }
             Event::FocusedWindowChanged { .. } | Event::ApplicationActivated { .. } => {
                 self.sync_focused_window();
+                false
             }
             Event::ApplicationDeactivated { .. }
             | Event::ApplicationHidden { .. }
-            | Event::ApplicationShown { .. } => {}
+            | Event::ApplicationShown { .. } => false,
         }
     }
 

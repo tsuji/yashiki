@@ -131,6 +131,7 @@ yashiki bind alt-h layout-cmd set-main-ratio 0.5
 - **layout.rs** - `LayoutEngine` for spawning and communicating with tatami
 - **app.rs** - Main event loop with CFRunLoop timer
   - Processes: IPC commands, hotkey commands, workspace events, observer events
+  - Auto-retile on window add/remove
   - Runs init script at startup
 - **main.rs** - Daemon + CLI mode
 - **yashiki-ipc/** - Command/Response/LayoutMessage enums
@@ -142,7 +143,6 @@ yashiki bind alt-h layout-cmd set-main-ratio 0.5
 
 ### Not Yet Implemented
 - `SwapWindow` command (swap positions with window in direction)
-- Auto-retile on window add/remove
 - `CloseWindow` / `ToggleFloat`
 
 ## Development Notes
