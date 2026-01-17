@@ -22,6 +22,8 @@ pub enum LayoutResult {
     Layout { windows: Vec<WindowGeometry> },
     /// Command succeeded
     Ok,
+    /// Command succeeded and requests retile
+    NeedsRetile,
     /// Error occurred
     Error { message: String },
 }

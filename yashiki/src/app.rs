@@ -142,7 +142,7 @@ impl App {
         let state = RefCell::new(state);
 
         // Spawn layout engine
-        let layout_engine = match LayoutEngine::spawn("tatami") {
+        let layout_engine = match LayoutEngine::spawn("byobu") {
             Ok(engine) => Some(engine),
             Err(e) => {
                 tracing::warn!("Failed to spawn layout engine: {}", e);
@@ -263,7 +263,9 @@ impl App {
                 // On external focus change, notify layout engine and switch tag if focused window is hidden
                 if is_focus_event {
                     if let Some(focused_id) = ctx.state.borrow().focused {
-                        notify_layout_focus(&ctx.layout_engine, focused_id);
+                        if notify_layout_focus(&ctx.layout_engine, focused_id) {
+                            needs_retile = true;
+                        }
                     }
                     let moves = {
                         let mut engine = ctx.layout_engine.borrow_mut();
@@ -587,7 +589,9 @@ fn execute_effects<M: WindowManipulator>(
             }
             Effect::FocusWindow { window_id, pid } => {
                 manipulator.focus_window(window_id, pid);
-                notify_layout_focus(layout_engine, window_id);
+                if notify_layout_focus(layout_engine, window_id) {
+                    do_retile(state, layout_engine, manipulator);
+                }
             }
             Effect::MoveWindowToPosition {
                 window_id,
@@ -795,13 +799,19 @@ fn switch_tag_for_focused_window(
     Some(moves)
 }
 
-fn notify_layout_focus(layout_engine: &RefCell<Option<LayoutEngine>>, window_id: u32) {
+/// Notify layout engine of focus change.
+/// Returns true if the layout engine requests a retile.
+fn notify_layout_focus(layout_engine: &RefCell<Option<LayoutEngine>>, window_id: u32) -> bool {
     let mut engine = layout_engine.borrow_mut();
     if let Some(ref mut engine) = *engine {
-        if let Err(e) = engine.send_command("focus-changed", &[window_id.to_string()]) {
-            tracing::warn!("Failed to notify layout engine of focus change: {}", e);
+        match engine.send_command("focus-changed", &[window_id.to_string()]) {
+            Ok(needs_retile) => return needs_retile,
+            Err(e) => {
+                tracing::warn!("Failed to notify layout engine of focus change: {}", e);
+            }
         }
     }
+    false
 }
 
 #[cfg(test)]

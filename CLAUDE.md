@@ -77,6 +77,7 @@ enum LayoutMessage {
 enum LayoutResult {
     Layout { windows: Vec<WindowGeometry> },  // id, x, y, width, height
     Ok,
+    NeedsRetile,  // command succeeded, requests retile
     Error { message: String },
 }
 ```
@@ -86,8 +87,9 @@ enum LayoutResult {
 yashiki automatically sends `focus-changed <window_id>` to the layout engine when focus changes.
 This allows layout engines to track the focused window without explicit user commands.
 
-- **tatami**: Uses for `zoom` command (zoom without args uses focused window)
-- **byobu**: Uses to determine which window to show on top
+Layout engines can return `NeedsRetile` to request a retile after focus changes:
+- **tatami**: Returns `Ok` (no retile needed - focus doesn't affect layout)
+- **byobu**: Returns `NeedsRetile` (focused window moves to front)
 
 ## CLI Usage
 
@@ -191,7 +193,7 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 - Master-stack layout
 - Internal state: main_count, main_ratio, inner_gap, outer_gap, smart_gaps, focused_window_id, main_window_id
 - Commands:
-  - `focus-changed <window_id>` - notification from yashiki (automatic)
+  - `focus-changed <window_id>` - notification from yashiki (returns `Ok`)
   - `zoom [window_id]` - set main window (uses focused window if id omitted)
   - `set-main-ratio <0.1-0.9>`, `inc-main-ratio [delta]`, `dec-main-ratio [delta]` (default delta: 0.05)
   - `inc-main-count`, `dec-main-count`, `set-main-count <n>`
@@ -201,11 +203,12 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 
 ### yashiki-layout-byobu (layout engine)
 - Accordion layout (AeroSpace-style)
-- All windows stacked at same position, focused window on top
-- Padding reveals edges of adjacent windows
+- Focused window always at rightmost/frontmost position
+- Windows staggered incrementally (each offset by `index * padding`)
+- All windows have same size, leaving room for all tabs
 - Internal state: padding, orientation, focused_window_id
 - Commands:
-  - `focus-changed <window_id>` - notification from yashiki (automatic)
+  - `focus-changed <window_id>` - notification from yashiki (returns `NeedsRetile`)
   - `set-padding <px>`, `inc-padding [delta]`, `dec-padding [delta]` (default: 30px, delta: 5px)
   - `set-orientation <horizontal|h|vertical|v>`, `toggle-orientation`
 
@@ -290,7 +293,7 @@ Focus involves: `activate_application(pid)` then `AXUIElement.raise()`
 
 ## Testing
 
-### Current Test Coverage (68 tests)
+### Current Test Coverage (70 tests)
 
 Run tests: `cargo test --all`
 
@@ -300,7 +303,7 @@ Run tests: `cargo test --all`
 - `yashiki-ipc` - Command/Response/LayoutMessage serialization (17 tests)
 - `core/state.rs` - State management with MockWindowSystem (13 tests)
 - `app.rs` - `process_command()` effect generation (9 tests)
-- `yashiki-layout-byobu` - Accordion layout and commands (7 tests)
+- `yashiki-layout-byobu` - Accordion layout and commands (9 tests)
 
 ### Platform Abstraction Layer
 

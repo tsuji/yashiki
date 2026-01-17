@@ -112,7 +112,7 @@ fn handle_command(state: &mut LayoutState, cmd: &str, args: &[String]) -> Layout
         "focus-changed" => {
             if let Some(id) = args.first().and_then(|s| s.parse::<u32>().ok()) {
                 state.focused_window_id = Some(id);
-                LayoutResult::Ok
+                LayoutResult::NeedsRetile
             } else {
                 LayoutResult::Error {
                     message: "usage: focus-changed <window_id>".to_string(),
@@ -135,7 +135,16 @@ fn generate_layout(
         return vec![];
     }
 
-    let window_count = window_ids.len();
+    // Single window: full size, no padding
+    if window_ids.len() == 1 {
+        return vec![WindowGeometry {
+            id: window_ids[0],
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }];
+    }
 
     // Find the focused window index
     let focused_index = if let Some(focused_id) = state.focused_window_id {
@@ -147,80 +156,46 @@ fn generate_layout(
         0
     };
 
+    // Reorder windows: focused window goes to the end (rightmost/frontmost)
+    let mut ordered_ids: Vec<u32> = window_ids
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != focused_index)
+        .map(|(_, &id)| id)
+        .collect();
+    ordered_ids.push(window_ids[focused_index]);
+
+    let window_count = ordered_ids.len();
     let padding = state.padding;
 
-    window_ids
+    // Each window is offset by index * padding
+    // All windows have the same size, leaving room for all tabs
+    let total_offset = padding * (window_count as u32 - 1);
+
+    ordered_ids
         .iter()
         .enumerate()
         .map(|(index, &id)| {
-            let (left_padding, right_padding) =
-                calculate_padding(index, window_count, focused_index, padding);
+            let offset = padding * index as u32;
 
             match state.orientation {
                 Orientation::Horizontal => WindowGeometry {
                     id,
-                    x: left_padding as i32,
+                    x: offset as i32,
                     y: 0,
-                    width: width.saturating_sub(left_padding + right_padding),
+                    width: width.saturating_sub(total_offset),
                     height,
                 },
                 Orientation::Vertical => WindowGeometry {
                     id,
                     x: 0,
-                    y: left_padding as i32,
+                    y: offset as i32,
                     width,
-                    height: height.saturating_sub(left_padding + right_padding),
+                    height: height.saturating_sub(total_offset),
                 },
             }
         })
         .collect()
-}
-
-/// Calculate padding for a window based on its position relative to the focused window.
-/// Returns (left/top padding, right/bottom padding) depending on orientation.
-fn calculate_padding(
-    index: usize,
-    window_count: usize,
-    focused_index: usize,
-    padding: u32,
-) -> (u32, u32) {
-    let last_index = window_count.saturating_sub(1);
-
-    // Single window: no padding
-    if window_count == 1 {
-        return (0, 0);
-    }
-
-    // First window
-    if index == 0 {
-        // Adjacent to focused gets extra padding
-        if focused_index == 1 {
-            return (0, 2 * padding);
-        }
-        return (0, padding);
-    }
-
-    // Last window
-    if index == last_index {
-        // Adjacent to focused gets extra padding
-        if focused_index == last_index.saturating_sub(1) {
-            return (2 * padding, 0);
-        }
-        return (padding, 0);
-    }
-
-    // Window immediately before focused
-    if index + 1 == focused_index {
-        return (0, 2 * padding);
-    }
-
-    // Window immediately after focused
-    if index == focused_index + 1 {
-        return (2 * padding, 0);
-    }
-
-    // Default: padding on both sides
-    (padding, padding)
 }
 
 #[cfg(test)]
@@ -239,53 +214,65 @@ mod tests {
     }
 
     #[test]
-    fn test_two_windows_horizontal() {
+    fn test_two_windows_focused_first() {
         let mut state = LayoutState::default();
         state.padding = 30;
-        state.focused_window_id = Some(1);
+        state.focused_window_id = Some(1); // window ID 1 is at index 0
 
         let windows = generate_layout(&state, 1920, 1080, &[1, 2]);
         assert_eq!(windows.len(), 2);
 
-        // Window 1 (focused, first): no left padding, 2x right padding (adjacent to focused)
-        // Actually window 1 is focused and first, so it's index 0
-        // focused_index = 0, so window at index 1 is adjacent after
-        // Window 0 (first): (0, padding) but focused_index=0 doesn't trigger "adjacent to focused"
-        // Wait, let me reconsider...
-
-        // Window 0 is focused (index 0)
-        // Window 1 is at index 1, which is focused_index + 1, so it gets (2*padding, 0)
-        // Window 0: first window, focused_index = 0, so case focused_index == 1 is false
-        //   -> (0, padding)
+        // Reordered: [2, 1] (focused 1 goes to end)
+        // total_offset = 30 * 1 = 30
+        // Window 2 (index 0): x=0
+        assert_eq!(windows[0].id, 2);
         assert_eq!(windows[0].x, 0);
         assert_eq!(windows[0].width, 1920 - 30);
 
-        // Window 1: index=1, last, focused_index=0
-        //   index == last_index: true
-        //   focused_index == last_index - 1: 0 == 0? yes
-        //   -> (2*padding, 0)
-        assert_eq!(windows[1].x, 60);
-        assert_eq!(windows[1].width, 1920 - 60);
+        // Window 1 (index 1, focused): x=30
+        assert_eq!(windows[1].id, 1);
+        assert_eq!(windows[1].x, 30);
+        assert_eq!(windows[1].width, 1920 - 30);
+    }
+
+    #[test]
+    fn test_two_windows_focused_second() {
+        let mut state = LayoutState::default();
+        state.padding = 30;
+        state.focused_window_id = Some(2); // window ID 2 is at index 1
+
+        let windows = generate_layout(&state, 1920, 1080, &[1, 2]);
+        assert_eq!(windows.len(), 2);
+
+        // Reordered: [1, 2] (focused 2 already at end)
+        // Window 1 (index 0): x=0
+        assert_eq!(windows[0].id, 1);
+        assert_eq!(windows[0].x, 0);
+
+        // Window 2 (index 1, focused): x=30
+        assert_eq!(windows[1].id, 2);
+        assert_eq!(windows[1].x, 30);
     }
 
     #[test]
     fn test_three_windows_middle_focused() {
         let mut state = LayoutState::default();
         state.padding = 30;
-        state.focused_window_id = Some(2);
+        state.focused_window_id = Some(2); // window ID 2 is at index 1
 
         let windows = generate_layout(&state, 1920, 1080, &[1, 2, 3]);
-        // focused_index = 1 (window ID 2)
 
-        // Window 0 (first): focused_index == 1, so (0, 2*padding)
+        // Reordered: [1, 3, 2] (focused 2 goes to end)
+        // total_offset = 30 * 2 = 60
+        assert_eq!(windows[0].id, 1);
         assert_eq!(windows[0].x, 0);
         assert_eq!(windows[0].width, 1920 - 60);
 
-        // Window 1 (focused, middle): default (padding, padding)
+        assert_eq!(windows[1].id, 3);
         assert_eq!(windows[1].x, 30);
         assert_eq!(windows[1].width, 1920 - 60);
 
-        // Window 2 (last): focused_index == last_index - 1 = 1, so (2*padding, 0)
+        assert_eq!(windows[2].id, 2); // focused, rightmost
         assert_eq!(windows[2].x, 60);
         assert_eq!(windows[2].width, 1920 - 60);
     }
@@ -299,24 +286,53 @@ mod tests {
 
         let windows = generate_layout(&state, 1920, 1080, &[1, 2]);
 
-        // Window 0 (first, focused): (0, padding) applied to y/height
-        assert_eq!(windows[0].x, 0);
+        // Reordered: [2, 1] (focused 1 goes to end)
+        assert_eq!(windows[0].id, 2);
         assert_eq!(windows[0].y, 0);
-        assert_eq!(windows[0].width, 1920);
         assert_eq!(windows[0].height, 1080 - 30);
 
-        // Window 1 (last): (2*padding, 0) applied to y/height
-        assert_eq!(windows[1].x, 0);
-        assert_eq!(windows[1].y, 60);
-        assert_eq!(windows[1].width, 1920);
-        assert_eq!(windows[1].height, 1080 - 60);
+        assert_eq!(windows[1].id, 1); // focused
+        assert_eq!(windows[1].y, 30);
+        assert_eq!(windows[1].height, 1080 - 30);
+    }
+
+    #[test]
+    fn test_five_windows_staggered() {
+        let mut state = LayoutState::default();
+        state.padding = 30;
+        state.focused_window_id = Some(3); // window ID 3 is at index 2
+
+        let windows = generate_layout(&state, 1920, 1080, &[1, 2, 3, 4, 5]);
+
+        // Reordered: [1, 2, 4, 5, 3] (focused 3 goes to end)
+        // total_offset = 30 * 4 = 120
+        // All windows have width = 1920 - 120 = 1800
+        assert_eq!(windows[0].id, 1);
+        assert_eq!(windows[0].x, 0);
+        assert_eq!(windows[0].width, 1920 - 120);
+
+        assert_eq!(windows[1].id, 2);
+        assert_eq!(windows[1].x, 30);
+        assert_eq!(windows[1].width, 1920 - 120);
+
+        assert_eq!(windows[2].id, 4);
+        assert_eq!(windows[2].x, 60);
+        assert_eq!(windows[2].width, 1920 - 120);
+
+        assert_eq!(windows[3].id, 5);
+        assert_eq!(windows[3].x, 90);
+        assert_eq!(windows[3].width, 1920 - 120);
+
+        assert_eq!(windows[4].id, 3); // focused, rightmost
+        assert_eq!(windows[4].x, 120);
+        assert_eq!(windows[4].width, 1920 - 120);
     }
 
     #[test]
     fn test_focus_changed_command() {
         let mut state = LayoutState::default();
         let result = handle_command(&mut state, "focus-changed", &["42".to_string()]);
-        assert!(matches!(result, LayoutResult::Ok));
+        assert!(matches!(result, LayoutResult::NeedsRetile));
         assert_eq!(state.focused_window_id, Some(42));
     }
 

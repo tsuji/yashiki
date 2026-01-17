@@ -51,13 +51,15 @@ impl LayoutEngine {
             LayoutResult::Error { message } => {
                 anyhow::bail!("Layout engine error: {}", message)
             }
-            LayoutResult::Ok => {
-                anyhow::bail!("Unexpected 'ok' response for layout request")
+            LayoutResult::Ok | LayoutResult::NeedsRetile => {
+                anyhow::bail!("Unexpected 'ok' or 'needs_retile' response for layout request")
             }
         }
     }
 
-    pub fn send_command(&mut self, cmd: &str, args: &[String]) -> Result<()> {
+    /// Send a command to the layout engine.
+    /// Returns Ok(true) if the layout engine requests a retile, Ok(false) otherwise.
+    pub fn send_command(&mut self, cmd: &str, args: &[String]) -> Result<bool> {
         let msg = LayoutMessage::Command {
             cmd: cmd.to_string(),
             args: args.to_vec(),
@@ -66,7 +68,8 @@ impl LayoutEngine {
         let result = self.send(&msg)?;
 
         match result {
-            LayoutResult::Ok => Ok(()),
+            LayoutResult::Ok => Ok(false),
+            LayoutResult::NeedsRetile => Ok(true),
             LayoutResult::Error { message } => {
                 anyhow::bail!("Layout engine error: {}", message)
             }
