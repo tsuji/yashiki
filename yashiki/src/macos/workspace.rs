@@ -48,6 +48,7 @@ pub fn exec_command(command: &str) -> Result<(), String> {
 pub enum WorkspaceEvent {
     AppLaunched { pid: i32 },
     AppTerminated { pid: i32 },
+    DisplaysChanged,
 }
 
 struct Ivars {
@@ -83,6 +84,15 @@ define_class!(
                 }
             }
         }
+
+        #[unsafe(method(displaysChanged:))]
+        fn displays_changed(&self, _notification: &NSNotification) {
+            tracing::debug!("Screen parameters changed");
+            let tx = self.ivars().event_tx.borrow();
+            if let Some(sender) = tx.as_ref() {
+                let _: Result<(), _> = sender.send(WorkspaceEvent::DisplaysChanged);
+            }
+        }
     }
 );
 
@@ -116,7 +126,7 @@ impl WorkspaceWatcher {
 
         unsafe {
             let workspace = NSWorkspace::sharedWorkspace();
-            let center = workspace.notificationCenter();
+            let workspace_center = workspace.notificationCenter();
 
             let launch_name = NSString::from_str("NSWorkspaceDidLaunchApplicationNotification");
             let terminate_name =
@@ -125,17 +135,29 @@ impl WorkspaceWatcher {
             let observer_obj: &AnyObject =
                 std::mem::transmute::<&WorkspaceObserver, &AnyObject>(&*observer);
 
-            center.addObserver_selector_name_object(
+            workspace_center.addObserver_selector_name_object(
                 observer_obj,
                 sel!(appLaunched:),
                 Some(&launch_name),
                 None,
             );
 
-            center.addObserver_selector_name_object(
+            workspace_center.addObserver_selector_name_object(
                 observer_obj,
                 sel!(appTerminated:),
                 Some(&terminate_name),
+                None,
+            );
+
+            // Register for screen change notifications using default notification center
+            let default_center = objc2_foundation::NSNotificationCenter::defaultCenter();
+            let screen_changed_name =
+                NSString::from_str("NSApplicationDidChangeScreenParametersNotification");
+
+            default_center.addObserver_selector_name_object(
+                observer_obj,
+                sel!(displaysChanged:),
+                Some(&screen_changed_name),
                 None,
             );
         }

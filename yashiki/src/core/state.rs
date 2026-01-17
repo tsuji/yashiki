@@ -3,7 +3,7 @@ use crate::event::Event;
 use crate::macos::DisplayId;
 use crate::platform::WindowSystem;
 use std::collections::{HashMap, HashSet};
-use yashiki_ipc::{Direction, OutputDirection};
+use yashiki_ipc::{Direction, OutputDirection, OutputSpecifier};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowMove {
@@ -43,7 +43,14 @@ impl State {
         self.default_layout = layout;
     }
 
-    pub fn set_layout(&mut self, tag: Option<u32>, layout: String) {
+    pub fn set_layout_on_display(
+        &mut self,
+        tag: Option<u32>,
+        display_id: Option<DisplayId>,
+        layout: String,
+    ) {
+        let target_display = display_id.unwrap_or(self.focused_display);
+
         match tag {
             Some(tag) => {
                 // Set layout for specific tag
@@ -51,26 +58,33 @@ impl State {
                 self.tag_layouts.insert(tag as u8, layout);
             }
             None => {
-                // Set layout for current tag on focused display
-                let Some(disp) = self.displays.get(&self.focused_display) else {
+                // Set layout for current tag on target display
+                let Some(disp) = self.displays.get(&target_display) else {
                     return;
                 };
                 if let Some(current_tag) = disp.visible_tags.first_tag() {
-                    tracing::info!("Set layout for current tag {}: {}", current_tag, layout);
+                    tracing::info!(
+                        "Set layout for current tag {} on display {}: {}",
+                        current_tag,
+                        target_display,
+                        layout
+                    );
                     self.tag_layouts.insert(current_tag as u8, layout.clone());
                 }
                 // Also update the display's current layout
-                let disp = self.displays.get_mut(&self.focused_display).unwrap();
+                let disp = self.displays.get_mut(&target_display).unwrap();
                 disp.previous_layout = disp.current_layout.take();
                 disp.current_layout = Some(layout);
             }
         }
     }
 
-    pub fn get_layout(&self, tag: Option<u32>) -> &str {
+    pub fn get_layout_on_display(&self, tag: Option<u32>, display_id: Option<DisplayId>) -> &str {
+        let target_display = display_id.unwrap_or(self.focused_display);
+
         match tag {
             Some(tag) => self.resolve_layout_for_tag(tag as u8),
-            None => self.current_layout(),
+            None => self.current_layout_for_display(target_display),
         }
     }
 
@@ -102,15 +116,133 @@ impl State {
             .unwrap_or(Tag::new(1))
     }
 
+    pub fn resolve_output(&self, spec: &OutputSpecifier) -> Option<DisplayId> {
+        match spec {
+            OutputSpecifier::Id(id) => {
+                if self.displays.contains_key(id) {
+                    Some(*id)
+                } else {
+                    None
+                }
+            }
+            OutputSpecifier::Name(name) => {
+                // Case-insensitive partial match
+                let name_lower = name.to_lowercase();
+                self.displays
+                    .values()
+                    .find(|d| d.name.to_lowercase().contains(&name_lower))
+                    .map(|d| d.id)
+            }
+        }
+    }
+
+    pub fn get_target_display(
+        &self,
+        output: Option<&OutputSpecifier>,
+    ) -> Result<DisplayId, String> {
+        match output {
+            Some(spec) => self
+                .resolve_output(spec)
+                .ok_or_else(|| format!("Output not found: {:?}", spec)),
+            None => Ok(self.focused_display),
+        }
+    }
+
+    pub fn handle_display_change<W: WindowSystem>(
+        &mut self,
+        ws: &W,
+    ) -> (Vec<WindowMove>, Vec<DisplayId>) {
+        let display_infos = ws.get_all_displays();
+        let current_ids: HashSet<_> = display_infos.iter().map(|d| d.id).collect();
+        let removed_ids: Vec<_> = self
+            .displays
+            .keys()
+            .filter(|id| !current_ids.contains(id))
+            .copied()
+            .collect();
+
+        if removed_ids.is_empty() {
+            // No displays were removed, just update frames and add new displays
+            self.sync_all(ws);
+            return (vec![], vec![]);
+        }
+
+        tracing::info!("Displays disconnected: {:?}", removed_ids);
+
+        // Find fallback display (prefer main display, then any remaining display)
+        let fallback_display = display_infos
+            .iter()
+            .find(|d| d.is_main)
+            .or_else(|| display_infos.first())
+            .map(|d| d.id);
+
+        let Some(fallback_id) = fallback_display else {
+            tracing::warn!("No fallback display available");
+            return (vec![], vec![]);
+        };
+
+        // Find orphaned windows and move them to the fallback display
+        let mut window_moves = Vec::new();
+        let mut affected_displays = HashSet::new();
+
+        for window in self.windows.values_mut() {
+            if removed_ids.contains(&window.display_id) {
+                tracing::info!(
+                    "Moving orphaned window {} ({}) from display {} to {}",
+                    window.id,
+                    window.app_name,
+                    window.display_id,
+                    fallback_id
+                );
+                window.display_id = fallback_id;
+                affected_displays.insert(fallback_id);
+            }
+        }
+
+        // Update focused_display if it was removed
+        if removed_ids.contains(&self.focused_display) {
+            tracing::info!(
+                "Focused display {} was removed, switching to {}",
+                self.focused_display,
+                fallback_id
+            );
+            self.focused_display = fallback_id;
+        }
+
+        // Remove disconnected displays from state
+        for id in &removed_ids {
+            self.displays.remove(id);
+        }
+
+        // Sync remaining displays (update frames, add new displays)
+        self.sync_all(ws);
+
+        // Compute window moves for hiding/showing based on new tag visibility
+        for display_id in &affected_displays {
+            let moves = self.compute_layout_changes_for_display(*display_id);
+            window_moves.extend(moves);
+        }
+
+        let displays_to_retile: Vec<_> = affected_displays.into_iter().collect();
+        (window_moves, displays_to_retile)
+    }
+
     pub fn sync_all<W: WindowSystem>(&mut self, ws: &W) {
         // Sync displays
         let display_infos = ws.get_all_displays();
         for info in &display_infos {
             if !self.displays.contains_key(&info.id) {
-                let display = Display::new(info.id, Rect::from_bounds(&info.frame));
+                let display = Display::new(
+                    info.id,
+                    info.name.clone(),
+                    Rect::from_bounds(&info.frame),
+                    info.is_main,
+                );
                 self.displays.insert(info.id, display);
             } else if let Some(display) = self.displays.get_mut(&info.id) {
+                display.name = info.name.clone();
                 display.frame = Rect::from_bounds(&info.frame);
+                display.is_main = info.is_main;
             }
             if info.is_main && self.focused_display == 0 {
                 self.focused_display = info.id;
@@ -372,11 +504,15 @@ impl State {
         }
     }
 
-    // Tag operations - now operate on focused_display
+    // Tag operations - now operate on focused_display or specified display
 
     pub fn view_tag(&mut self, tag: u32) -> Vec<WindowMove> {
+        self.view_tag_on_display(tag, self.focused_display)
+    }
+
+    pub fn view_tag_on_display(&mut self, tag: u32, display_id: DisplayId) -> Vec<WindowMove> {
         let new_layout = self.resolve_layout_for_tag(tag as u8).to_string();
-        let Some(disp) = self.displays.get_mut(&self.focused_display) else {
+        let Some(disp) = self.displays.get_mut(&display_id) else {
             return vec![];
         };
         let new_visible = Tag::new(tag);
@@ -385,7 +521,7 @@ impl State {
         }
         tracing::info!(
             "View tag on display {}: {} -> {}, layout: {:?} -> {}",
-            self.focused_display,
+            display_id,
             disp.visible_tags.mask(),
             new_visible.mask(),
             disp.current_layout,
@@ -395,11 +531,15 @@ impl State {
         disp.visible_tags = new_visible;
         disp.previous_layout = disp.current_layout.take();
         disp.current_layout = Some(new_layout);
-        self.compute_layout_changes_for_display(self.focused_display)
+        self.compute_layout_changes_for_display(display_id)
     }
 
-    pub fn toggle_view_tag(&mut self, tag: u32) -> Vec<WindowMove> {
-        let Some(disp) = self.displays.get_mut(&self.focused_display) else {
+    pub fn toggle_view_tag_on_display(
+        &mut self,
+        tag: u32,
+        display_id: DisplayId,
+    ) -> Vec<WindowMove> {
+        let Some(disp) = self.displays.get_mut(&display_id) else {
             return vec![];
         };
         let tag = Tag::new(tag);
@@ -409,13 +549,13 @@ impl State {
         }
         tracing::info!(
             "Toggle view tag on display {}: {} -> {}",
-            self.focused_display,
+            display_id,
             disp.visible_tags.mask(),
             new_visible.mask()
         );
         disp.previous_visible_tags = disp.visible_tags;
         disp.visible_tags = new_visible;
-        self.compute_layout_changes_for_display(self.focused_display)
+        self.compute_layout_changes_for_display(display_id)
     }
 
     pub fn view_tag_last(&mut self) -> Vec<WindowMove> {
@@ -851,13 +991,14 @@ mod tests {
         let ws = setup_mock_system();
         let mut state = State::new();
         state.sync_all(&ws);
+        let display_id = state.focused_display;
 
         // Toggle tag 2 on (so visible = tag 1 | tag 2)
-        state.toggle_view_tag(2);
+        state.toggle_view_tag_on_display(2, display_id);
         assert_eq!(state.visible_tags().mask(), 0b11);
 
         // Toggle tag 1 off (so visible = tag 2 only)
-        state.toggle_view_tag(1);
+        state.toggle_view_tag_on_display(1, display_id);
         assert_eq!(state.visible_tags().mask(), 0b10);
     }
 
@@ -866,9 +1007,10 @@ mod tests {
         let ws = setup_mock_system();
         let mut state = State::new();
         state.sync_all(&ws);
+        let display_id = state.focused_display;
 
         // Try to toggle off the only visible tag - should do nothing
-        let moves = state.toggle_view_tag(1);
+        let moves = state.toggle_view_tag_on_display(1, display_id);
         assert_eq!(state.visible_tags().mask(), 0b1);
         assert!(moves.is_empty());
     }

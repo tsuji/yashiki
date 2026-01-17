@@ -13,7 +13,7 @@ use objc2_foundation::MainThreadMarker;
 use std::cell::RefCell;
 use std::sync::mpsc as std_mpsc;
 use tokio::sync::mpsc;
-use yashiki_ipc::{BindingInfo, Command, Response, StateInfo, WindowInfo};
+use yashiki_ipc::{BindingInfo, Command, OutputInfo, Response, StateInfo, WindowInfo};
 
 type IpcCommandWithResponse = (Command, mpsc::Sender<Response>);
 
@@ -217,7 +217,7 @@ impl App {
                 );
             }
 
-            // Process workspace events (app launch/terminate)
+            // Process workspace events (app launch/terminate/display change)
             while let Ok(event) = ctx.workspace_event_rx.try_recv() {
                 match event {
                     WorkspaceEvent::AppLaunched { pid } => {
@@ -231,6 +231,37 @@ impl App {
                         ctx.observer_manager.borrow_mut().remove_observer(pid);
                         // Remove windows belonging to this PID from state
                         if ctx.state.borrow_mut().sync_pid(&ctx.window_system, pid) {
+                            do_retile(
+                                &ctx.state,
+                                &ctx.layout_engine_manager,
+                                &ctx.window_manipulator,
+                            );
+                        }
+                    }
+                    WorkspaceEvent::DisplaysChanged => {
+                        tracing::info!("Display configuration changed");
+                        let (moves, displays_to_retile) = ctx
+                            .state
+                            .borrow_mut()
+                            .handle_display_change(&ctx.window_system);
+
+                        // Apply window moves for orphaned windows
+                        if !moves.is_empty() {
+                            ctx.window_manipulator.apply_window_moves(&moves);
+                        }
+
+                        // Retile affected displays
+                        if !displays_to_retile.is_empty() {
+                            for display_id in displays_to_retile {
+                                do_retile_display(
+                                    &ctx.state,
+                                    &ctx.layout_engine_manager,
+                                    &ctx.window_manipulator,
+                                    display_id,
+                                );
+                            }
+                        } else {
+                            // If no specific displays, retile all
                             do_retile(
                                 &ctx.state,
                                 &ctx.layout_engine_manager,
@@ -374,6 +405,24 @@ fn process_command(
                 .collect();
             CommandResult::with_response(Response::Windows { windows })
         }
+        Command::ListOutputs => {
+            let outputs: Vec<OutputInfo> = state
+                .displays
+                .values()
+                .map(|d| OutputInfo {
+                    id: d.id,
+                    name: d.name.clone(),
+                    x: d.frame.x,
+                    y: d.frame.y,
+                    width: d.frame.width,
+                    height: d.frame.height,
+                    is_main: d.is_main,
+                    visible_tags: d.visible_tags.mask(),
+                    is_focused: state.focused_display == d.id,
+                })
+                .collect();
+            CommandResult::with_response(Response::Outputs { outputs })
+        }
         Command::GetState => CommandResult::with_response(Response::State {
             state: StateInfo {
                 visible_tags: state.visible_tags().mask(),
@@ -402,19 +451,27 @@ fn process_command(
         }
 
         // Tag operations - mutate state, return effects
-        Command::ViewTag { tag } => {
-            let moves = state.view_tag(*tag);
+        Command::ViewTag { tag, output } => {
+            let display_id = match state.get_target_display(output.as_ref()) {
+                Ok(id) => id,
+                Err(e) => return CommandResult::error(e),
+            };
+            let moves = state.view_tag_on_display(*tag, display_id);
             CommandResult::ok_with_effects(vec![
                 Effect::ApplyWindowMoves(moves),
-                Effect::Retile,
+                Effect::RetileDisplays(vec![display_id]),
                 Effect::FocusVisibleWindowIfNeeded,
             ])
         }
-        Command::ToggleViewTag { tag } => {
-            let moves = state.toggle_view_tag(*tag);
+        Command::ToggleViewTag { tag, output } => {
+            let display_id = match state.get_target_display(output.as_ref()) {
+                Ok(id) => id,
+                Err(e) => return CommandResult::error(e),
+            };
+            let moves = state.toggle_view_tag_on_display(*tag, display_id);
             CommandResult::ok_with_effects(vec![
                 Effect::ApplyWindowMoves(moves),
-                Effect::Retile,
+                Effect::RetileDisplays(vec![display_id]),
                 Effect::FocusVisibleWindowIfNeeded,
             ])
         }
@@ -500,17 +557,33 @@ fn process_command(
             state.set_default_layout(layout.clone());
             CommandResult::ok()
         }
-        Command::SetLayout { tag, layout } => {
-            state.set_layout(*tag, layout.clone());
+        Command::SetLayout {
+            tag,
+            output,
+            layout,
+        } => {
+            let display_id = match state.get_target_display(output.as_ref()) {
+                Ok(id) => Some(id),
+                Err(e) => return CommandResult::error(e),
+            };
+            state.set_layout_on_display(*tag, display_id, layout.clone());
             // Only retile if setting for current tag (no tag specified)
             if tag.is_none() {
-                CommandResult::ok_with_effects(vec![Effect::Retile])
+                if let Some(id) = display_id {
+                    CommandResult::ok_with_effects(vec![Effect::RetileDisplays(vec![id])])
+                } else {
+                    CommandResult::ok_with_effects(vec![Effect::Retile])
+                }
             } else {
                 CommandResult::ok()
             }
         }
-        Command::GetLayout { tag } => {
-            let layout = state.get_layout(*tag).to_string();
+        Command::GetLayout { tag, output } => {
+            let display_id = match state.get_target_display(output.as_ref()) {
+                Ok(id) => Some(id),
+                Err(e) => return CommandResult::error(e),
+            };
+            let layout = state.get_layout_on_display(*tag, display_id).to_string();
             CommandResult::with_response(Response::Layout { layout })
         }
 
@@ -522,7 +595,17 @@ fn process_command(
             },
             Effect::Retile,
         ]),
-        Command::Retile => CommandResult::ok_with_effects(vec![Effect::Retile]),
+        Command::Retile { output } => {
+            if let Some(ref spec) = output {
+                let display_id = match state.get_target_display(Some(spec)) {
+                    Ok(id) => id,
+                    Err(e) => return CommandResult::error(e),
+                };
+                CommandResult::ok_with_effects(vec![Effect::RetileDisplays(vec![display_id])])
+            } else {
+                CommandResult::ok_with_effects(vec![Effect::Retile])
+            }
+        }
 
         // Exec commands
         Command::Exec { command } => {
@@ -885,15 +968,18 @@ mod tests {
         let result = process_command(
             &mut state,
             &mut hotkey_manager,
-            &Command::ViewTag { tag: 2 },
+            &Command::ViewTag {
+                tag: 2,
+                output: None,
+            },
         );
 
         assert!(matches!(result.response, Response::Ok));
         assert_eq!(result.effects.len(), 3);
 
-        // Should have ApplyWindowMoves, Retile, FocusVisibleWindowIfNeeded
+        // Should have ApplyWindowMoves, RetileDisplays, FocusVisibleWindowIfNeeded
         assert!(matches!(result.effects[0], Effect::ApplyWindowMoves(_)));
-        assert!(matches!(result.effects[1], Effect::Retile));
+        assert!(matches!(result.effects[1], Effect::RetileDisplays(_)));
         assert!(matches!(
             result.effects[2],
             Effect::FocusVisibleWindowIfNeeded
@@ -1028,7 +1114,11 @@ mod tests {
     fn test_retile_produces_retile_effect() {
         let (mut state, mut hotkey_manager) = setup_state();
 
-        let result = process_command(&mut state, &mut hotkey_manager, &Command::Retile);
+        let result = process_command(
+            &mut state,
+            &mut hotkey_manager,
+            &Command::Retile { output: None },
+        );
 
         assert!(matches!(result.response, Response::Ok));
         assert_eq!(result.effects.len(), 1);

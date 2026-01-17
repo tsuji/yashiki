@@ -4,7 +4,9 @@ use crate::macos::DisplayId;
 #[derive(Debug, Clone)]
 pub struct Display {
     pub id: DisplayId,
+    pub name: String,
     pub frame: Rect,
+    pub is_main: bool,
     pub visible_tags: Tag,
     pub previous_visible_tags: Tag,
     pub window_order: Vec<WindowId>,
@@ -13,10 +15,12 @@ pub struct Display {
 }
 
 impl Display {
-    pub fn new(id: DisplayId, frame: Rect) -> Self {
+    pub fn new(id: DisplayId, name: String, frame: Rect, is_main: bool) -> Self {
         Self {
             id,
+            name,
             frame,
+            is_main,
             visible_tags: Tag::new(1),
             previous_visible_tags: Tag::new(1),
             window_order: Vec::new(),

@@ -344,6 +344,7 @@ pub mod mock {
     ) -> DisplayInfo {
         DisplayInfo {
             id,
+            name: format!("Display {}", id),
             frame: Bounds {
                 x,
                 y,

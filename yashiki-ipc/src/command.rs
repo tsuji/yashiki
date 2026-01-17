@@ -4,42 +4,85 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
     // Window operations
-    FocusWindow { direction: Direction },
-    SwapWindow { direction: Direction },
+    FocusWindow {
+        direction: Direction,
+    },
+    SwapWindow {
+        direction: Direction,
+    },
     CloseWindow,
     ToggleFloat,
 
     // Tag operations
-    ViewTag { tag: u32 },
-    ToggleViewTag { tag: u32 },
+    ViewTag {
+        tag: u32,
+        output: Option<OutputSpecifier>,
+    },
+    ToggleViewTag {
+        tag: u32,
+        output: Option<OutputSpecifier>,
+    },
     ViewTagLast,
-    MoveToTag { tag: u32 },
-    ToggleWindowTag { tag: u32 },
+    MoveToTag {
+        tag: u32,
+    },
+    ToggleWindowTag {
+        tag: u32,
+    },
 
     // Output (display) operations
-    FocusOutput { direction: OutputDirection },
-    SendToOutput { direction: OutputDirection },
+    FocusOutput {
+        direction: OutputDirection,
+    },
+    SendToOutput {
+        direction: OutputDirection,
+    },
 
     // Layout operations
-    SetDefaultLayout { layout: String },
-    SetLayout { tag: Option<u32>, layout: String },
-    GetLayout { tag: Option<u32> },
-    LayoutCommand { cmd: String, args: Vec<String> },
-    Retile,
+    SetDefaultLayout {
+        layout: String,
+    },
+    SetLayout {
+        tag: Option<u32>,
+        output: Option<OutputSpecifier>,
+        layout: String,
+    },
+    GetLayout {
+        tag: Option<u32>,
+        output: Option<OutputSpecifier>,
+    },
+    LayoutCommand {
+        cmd: String,
+        args: Vec<String>,
+    },
+    Retile {
+        output: Option<OutputSpecifier>,
+    },
 
     // Keybinding operations
-    Bind { key: String, action: Box<Command> },
-    Unbind { key: String },
+    Bind {
+        key: String,
+        action: Box<Command>,
+    },
+    Unbind {
+        key: String,
+    },
     ListBindings,
 
     // Queries
     ListWindows,
+    ListOutputs,
     GetState,
     FocusedWindow,
 
     // Exec
-    Exec { command: String },
-    ExecOrFocus { app_name: String, command: String },
+    Exec {
+        command: String,
+    },
+    ExecOrFocus {
+        app_name: String,
+        command: String,
+    },
 
     // Control
     Quit,
@@ -64,11 +107,19 @@ pub enum OutputDirection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OutputSpecifier {
+    Id(u32),
+    Name(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     Ok,
     Error { message: String },
     Windows { windows: Vec<WindowInfo> },
+    Outputs { outputs: Vec<OutputInfo> },
     State { state: StateInfo },
     Bindings { bindings: Vec<BindingInfo> },
     WindowId { id: Option<u32> },
@@ -79,6 +130,19 @@ pub enum Response {
 pub struct BindingInfo {
     pub key: String,
     pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputInfo {
+    pub id: u32,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub is_main: bool,
+    pub visible_tags: u32,
+    pub is_focused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,14 +174,17 @@ mod tests {
 
     #[test]
     fn test_command_view_tag_serialization() {
-        let cmd = Command::ViewTag { tag: 1 };
+        let cmd = Command::ViewTag {
+            tag: 1,
+            output: None,
+        };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"view_tag\""));
         assert!(json.contains("\"tag\":1"));
 
         let deserialized: Command = serde_json::from_str(&json).unwrap();
         match deserialized {
-            Command::ViewTag { tag } => assert_eq!(tag, 1),
+            Command::ViewTag { tag, .. } => assert_eq!(tag, 1),
             _ => panic!("Wrong variant"),
         }
     }
@@ -136,7 +203,10 @@ mod tests {
     fn test_command_bind_serialization() {
         let cmd = Command::Bind {
             key: "alt-1".to_string(),
-            action: Box::new(Command::ViewTag { tag: 1 }),
+            action: Box::new(Command::ViewTag {
+                tag: 1,
+                output: None,
+            }),
         };
         let json = serde_json::to_string(&cmd).unwrap();
 
@@ -145,7 +215,7 @@ mod tests {
             Command::Bind { key, action } => {
                 assert_eq!(key, "alt-1");
                 match *action {
-                    Command::ViewTag { tag } => assert_eq!(tag, 1),
+                    Command::ViewTag { tag, .. } => assert_eq!(tag, 1),
                     _ => panic!("Wrong inner variant"),
                 }
             }
@@ -301,6 +371,7 @@ mod tests {
         // Without tag (current tag)
         let cmd = Command::SetLayout {
             tag: None,
+            output: None,
             layout: "byobu".to_string(),
         };
         let json = serde_json::to_string(&cmd).unwrap();
@@ -309,7 +380,7 @@ mod tests {
 
         let deserialized: Command = serde_json::from_str(&json).unwrap();
         match deserialized {
-            Command::SetLayout { tag, layout } => {
+            Command::SetLayout { tag, layout, .. } => {
                 assert_eq!(tag, None);
                 assert_eq!(layout, "byobu");
             }
@@ -319,6 +390,7 @@ mod tests {
         // With tag
         let cmd = Command::SetLayout {
             tag: Some(3),
+            output: None,
             layout: "tatami".to_string(),
         };
         let json = serde_json::to_string(&cmd).unwrap();
@@ -326,7 +398,7 @@ mod tests {
 
         let deserialized: Command = serde_json::from_str(&json).unwrap();
         match deserialized {
-            Command::SetLayout { tag, layout } => {
+            Command::SetLayout { tag, layout, .. } => {
                 assert_eq!(tag, Some(3));
                 assert_eq!(layout, "tatami");
             }
@@ -337,24 +409,30 @@ mod tests {
     #[test]
     fn test_command_get_layout_serialization() {
         // Without tag (current layout)
-        let cmd = Command::GetLayout { tag: None };
+        let cmd = Command::GetLayout {
+            tag: None,
+            output: None,
+        };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"get_layout\""));
 
         let deserialized: Command = serde_json::from_str(&json).unwrap();
         match deserialized {
-            Command::GetLayout { tag } => assert_eq!(tag, None),
+            Command::GetLayout { tag, .. } => assert_eq!(tag, None),
             _ => panic!("Wrong variant"),
         }
 
         // With tag
-        let cmd = Command::GetLayout { tag: Some(2) };
+        let cmd = Command::GetLayout {
+            tag: Some(2),
+            output: None,
+        };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"tag\":2"));
 
         let deserialized: Command = serde_json::from_str(&json).unwrap();
         match deserialized {
-            Command::GetLayout { tag } => assert_eq!(tag, Some(2)),
+            Command::GetLayout { tag, .. } => assert_eq!(tag, Some(2)),
             _ => panic!("Wrong variant"),
         }
     }

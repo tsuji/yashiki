@@ -12,7 +12,7 @@ use anyhow::{bail, Result};
 use argh::FromArgs;
 use ipc::IpcClient;
 use tracing_subscriber::EnvFilter;
-use yashiki_ipc::{Command, Direction, OutputDirection, Response};
+use yashiki_ipc::{Command, Direction, OutputDirection, OutputSpecifier, Response};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -46,6 +46,7 @@ enum SubCommand {
     GetLayout(GetLayoutCmd),
     LayoutCmd(LayoutCmdCmd),
     ListWindows(ListWindowsCmd),
+    ListOutputs(ListOutputsCmd),
     GetState(GetStateCmd),
     FocusedWindow(FocusedWindowCmd),
     Exec(ExecCmd),
@@ -93,6 +94,9 @@ struct ListBindingsCmd {}
 #[derive(FromArgs)]
 #[argh(subcommand, name = "view-tag")]
 struct ViewTagCmd {
+    /// output (display) ID or name
+    #[argh(option)]
+    output: Option<String>,
     /// tag number (1-32)
     #[argh(positional)]
     tag: u32,
@@ -102,6 +106,9 @@ struct ViewTagCmd {
 #[derive(FromArgs)]
 #[argh(subcommand, name = "toggle-view-tag")]
 struct ToggleViewTagCmd {
+    /// output (display) ID or name
+    #[argh(option)]
+    output: Option<String>,
     /// tag number (1-32)
     #[argh(positional)]
     tag: u32,
@@ -169,7 +176,11 @@ struct SendToOutputCmd {
 /// Re-apply the current layout
 #[derive(FromArgs)]
 #[argh(subcommand, name = "retile")]
-struct RetileCmd {}
+struct RetileCmd {
+    /// output (display) ID or name
+    #[argh(option)]
+    output: Option<String>,
+}
 
 /// Set the default layout engine
 #[derive(FromArgs)]
@@ -187,6 +198,9 @@ struct SetLayoutCmd {
     /// tag number (1-32), defaults to current tag
     #[argh(option)]
     tag: Option<u32>,
+    /// output (display) ID or name
+    #[argh(option)]
+    output: Option<String>,
     /// layout engine name
     #[argh(positional)]
     layout: String,
@@ -199,6 +213,9 @@ struct GetLayoutCmd {
     /// tag number (1-32), defaults to current layout
     #[argh(option)]
     tag: Option<u32>,
+    /// output (display) ID or name
+    #[argh(option)]
+    output: Option<String>,
 }
 
 /// Send a command to the layout engine
@@ -217,6 +234,11 @@ struct LayoutCmdCmd {
 #[derive(FromArgs)]
 #[argh(subcommand, name = "list-windows")]
 struct ListWindowsCmd {}
+
+/// List all displays/outputs
+#[derive(FromArgs)]
+#[argh(subcommand, name = "list-outputs")]
+struct ListOutputsCmd {}
 
 /// Get current window manager state
 #[derive(FromArgs)]
@@ -313,6 +335,19 @@ fn run_cli(subcmd: SubCommand) -> Result<()> {
                 );
             }
         }
+        Response::Outputs { outputs } => {
+            let mut sorted_outputs = outputs;
+            sorted_outputs.sort_by_key(|o| o.id);
+            for o in sorted_outputs {
+                let main_marker = if o.is_main { " (main)" } else { "" };
+                let focused_marker = if o.is_focused { " *" } else { "" };
+                println!(
+                    "{}: {} [{}x{} @ ({},{})]{}{}",
+                    o.id, o.name, o.width, o.height, o.x, o.y, main_marker, focused_marker
+                );
+                println!("  visible_tags: {}", o.visible_tags);
+            }
+        }
         Response::State { state } => {
             println!("Visible tags: {}", state.visible_tags);
             println!("Focused window: {:?}", state.focused_window_id);
@@ -360,8 +395,14 @@ fn to_command(subcmd: SubCommand) -> Result<Command> {
         }
         SubCommand::Unbind(cmd) => Ok(Command::Unbind { key: cmd.key }),
         SubCommand::ListBindings(_) => Ok(Command::ListBindings),
-        SubCommand::ViewTag(cmd) => Ok(Command::ViewTag { tag: cmd.tag }),
-        SubCommand::ToggleViewTag(cmd) => Ok(Command::ToggleViewTag { tag: cmd.tag }),
+        SubCommand::ViewTag(cmd) => Ok(Command::ViewTag {
+            tag: cmd.tag,
+            output: parse_output_specifier(cmd.output),
+        }),
+        SubCommand::ToggleViewTag(cmd) => Ok(Command::ToggleViewTag {
+            tag: cmd.tag,
+            output: parse_output_specifier(cmd.output),
+        }),
         SubCommand::ViewTagLast(_) => Ok(Command::ViewTagLast),
         SubCommand::MoveToTag(cmd) => Ok(Command::MoveToTag { tag: cmd.tag }),
         SubCommand::ToggleWindowTag(cmd) => Ok(Command::ToggleWindowTag { tag: cmd.tag }),
@@ -377,18 +418,25 @@ fn to_command(subcmd: SubCommand) -> Result<Command> {
         SubCommand::SendToOutput(cmd) => Ok(Command::SendToOutput {
             direction: parse_output_direction(&cmd.direction)?,
         }),
-        SubCommand::Retile(_) => Ok(Command::Retile),
+        SubCommand::Retile(cmd) => Ok(Command::Retile {
+            output: parse_output_specifier(cmd.output),
+        }),
         SubCommand::SetDefaultLayout(cmd) => Ok(Command::SetDefaultLayout { layout: cmd.layout }),
         SubCommand::SetLayout(cmd) => Ok(Command::SetLayout {
             tag: cmd.tag,
+            output: parse_output_specifier(cmd.output),
             layout: cmd.layout,
         }),
-        SubCommand::GetLayout(cmd) => Ok(Command::GetLayout { tag: cmd.tag }),
+        SubCommand::GetLayout(cmd) => Ok(Command::GetLayout {
+            tag: cmd.tag,
+            output: parse_output_specifier(cmd.output),
+        }),
         SubCommand::LayoutCmd(cmd) => Ok(Command::LayoutCommand {
             cmd: cmd.cmd,
             args: cmd.args,
         }),
         SubCommand::ListWindows(_) => Ok(Command::ListWindows),
+        SubCommand::ListOutputs(_) => Ok(Command::ListOutputs),
         SubCommand::GetState(_) => Ok(Command::GetState),
         SubCommand::FocusedWindow(_) => Ok(Command::FocusedWindow),
         SubCommand::Exec(cmd) => Ok(Command::Exec {
@@ -432,18 +480,20 @@ fn parse_command(args: &[String]) -> Result<Command> {
         }
         "list-bindings" => Ok(Command::ListBindings),
         "view-tag" => {
+            let (output, rest) = parse_output_option(rest);
             if rest.is_empty() {
-                bail!("Usage: view-tag <tag>");
+                bail!("Usage: view-tag [--output <id|name>] <tag>");
             }
             let tag: u32 = rest[0].parse()?;
-            Ok(Command::ViewTag { tag })
+            Ok(Command::ViewTag { tag, output })
         }
         "toggle-view-tag" => {
+            let (output, rest) = parse_output_option(rest);
             if rest.is_empty() {
-                bail!("Usage: toggle-view-tag <tag>");
+                bail!("Usage: toggle-view-tag [--output <id|name>] <tag>");
             }
             let tag: u32 = rest[0].parse()?;
-            Ok(Command::ToggleViewTag { tag })
+            Ok(Command::ToggleViewTag { tag, output })
         }
         "view-tag-last" => Ok(Command::ViewTagLast),
         "move-to-tag" => {
@@ -488,7 +538,10 @@ fn parse_command(args: &[String]) -> Result<Command> {
             let direction = parse_output_direction(&rest[0])?;
             Ok(Command::SendToOutput { direction })
         }
-        "retile" => Ok(Command::Retile),
+        "retile" => {
+            let (output, _rest) = parse_output_option(rest);
+            Ok(Command::Retile { output })
+        }
         "set-default-layout" => {
             if rest.is_empty() {
                 bail!("Usage: set-default-layout <layout>");
@@ -498,25 +551,31 @@ fn parse_command(args: &[String]) -> Result<Command> {
             })
         }
         "set-layout" => {
-            // Parse --tag option if present
+            // Parse --tag and --output options if present
+            let (output, rest) = parse_output_option(rest);
             let (tag, layout) = if rest.len() >= 3 && rest[0] == "--tag" {
                 let tag: u32 = rest[1].parse()?;
                 (Some(tag), rest[2].clone())
             } else if rest.is_empty() {
-                bail!("Usage: set-layout [--tag <tag>] <layout>");
+                bail!("Usage: set-layout [--tag <tag>] [--output <id|name>] <layout>");
             } else {
                 (None, rest[0].clone())
             };
-            Ok(Command::SetLayout { tag, layout })
+            Ok(Command::SetLayout {
+                tag,
+                output,
+                layout,
+            })
         }
         "get-layout" => {
-            // Parse --tag option if present
+            // Parse --tag and --output options if present
+            let (output, rest) = parse_output_option(rest);
             let tag = if rest.len() >= 2 && rest[0] == "--tag" {
                 Some(rest[1].parse()?)
             } else {
                 None
             };
-            Ok(Command::GetLayout { tag })
+            Ok(Command::GetLayout { tag, output })
         }
         "layout-cmd" => {
             if rest.is_empty() {
@@ -528,6 +587,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
             })
         }
         "list-windows" => Ok(Command::ListWindows),
+        "list-outputs" => Ok(Command::ListOutputs),
         "get-state" => Ok(Command::GetState),
         "focused-window" => Ok(Command::FocusedWindow),
         "exec" => {
@@ -571,5 +631,24 @@ fn parse_output_direction(s: &str) -> Result<OutputDirection> {
         "next" => Ok(OutputDirection::Next),
         "prev" => Ok(OutputDirection::Prev),
         _ => bail!("Unknown output direction: {} (use next or prev)", s),
+    }
+}
+
+fn parse_output_specifier(s: Option<String>) -> Option<OutputSpecifier> {
+    s.map(|s| {
+        if let Ok(id) = s.parse::<u32>() {
+            OutputSpecifier::Id(id)
+        } else {
+            OutputSpecifier::Name(s)
+        }
+    })
+}
+
+fn parse_output_option(args: &[String]) -> (Option<OutputSpecifier>, &[String]) {
+    if args.len() >= 2 && args[0] == "--output" {
+        let output = parse_output_specifier(Some(args[1].clone()));
+        (output, &args[2..])
+    } else {
+        (None, args)
     }
 }

@@ -14,6 +14,7 @@ pub type DisplayId = u32;
 #[derive(Debug, Clone)]
 pub struct DisplayInfo {
     pub id: DisplayId,
+    pub name: String,
     pub frame: Bounds,
     pub is_main: bool,
 }
@@ -142,6 +143,9 @@ pub fn get_all_displays() -> Vec<DisplayInfo> {
             let display_id = get_display_id_for_screen(&screen)?;
             let visible_frame = screen.visibleFrame();
 
+            // Get display name via localizedName (macOS 10.15+)
+            let name = screen.localizedName().to_string();
+
             // NSScreen uses bottom-left origin, convert to top-left
             // visibleFrame.origin.y is distance from bottom of screen
             let full_frame = screen.frame();
@@ -150,6 +154,7 @@ pub fn get_all_displays() -> Vec<DisplayInfo> {
 
             Some(DisplayInfo {
                 id: display_id,
+                name,
                 frame: Bounds {
                     x: visible_frame.origin.x,
                     y: top_left_y,

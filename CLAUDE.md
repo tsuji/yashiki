@@ -104,8 +104,10 @@ yashiki version                   # Show version
 yashiki bind alt-1 view-tag 1     # Bind hotkey
 yashiki unbind alt-1              # Unbind hotkey
 yashiki list-bindings             # List all bindings
-yashiki view-tag 1                # Switch to tag 1
+yashiki view-tag 1                # Switch to tag 1 (on focused display)
+yashiki view-tag --output 2 1     # Switch to tag 1 on display 2
 yashiki toggle-view-tag 2         # Toggle tag 2 visibility
+yashiki toggle-view-tag --output "DELL" 2  # Toggle on display by name (partial match)
 yashiki view-tag-last             # Switch to previous tag
 yashiki move-to-tag 1             # Move focused window to tag 1
 yashiki focus-window next         # Focus next window
@@ -115,17 +117,21 @@ yashiki focus-output next         # Focus next display
 yashiki focus-output prev         # Focus previous display
 yashiki send-to-output next       # Move focused window to next display
 yashiki send-to-output prev       # Move focused window to previous display
-yashiki retile                    # Apply layout
+yashiki retile                    # Apply layout (all displays)
+yashiki retile --output 1         # Apply layout on display 1 only
 yashiki set-default-layout tatami       # Set default layout engine
 yashiki set-layout byobu                # Set layout for current tag
 yashiki set-layout --tag 2 byobu        # Set layout for specific tag
+yashiki set-layout --output 2 byobu     # Set layout on specific display
 yashiki get-layout                      # Get current layout
 yashiki get-layout --tag 2              # Get layout for specific tag
+yashiki get-layout --output 2           # Get layout for specific display
 yashiki layout-cmd set-main-ratio 0.6   # Send command to layout engine
 yashiki layout-cmd inc-main-count       # Increase main window count
 yashiki layout-cmd zoom                 # Move focused window to main area (tatami)
 yashiki layout-cmd zoom 123             # Move specific window to main area (tatami)
 yashiki list-windows              # List all windows
+yashiki list-outputs              # List all displays/outputs
 yashiki get-state                 # Get current state
 yashiki exec "open -a Safari"     # Execute shell command
 yashiki exec-or-focus --app-name Safari "open -a Safari"  # Focus if running, else exec
@@ -186,16 +192,18 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 - **macos/display.rs** - CGWindowList window enumeration, display info
   - `get_on_screen_windows()`, `get_all_displays()` (uses NSScreen visibleFrame)
 - **macos/observer.rs** - AXObserver for window events
-- **macos/workspace.rs** - NSWorkspace app launch/terminate notifications, `activate_application()`, `get_frontmost_app_pid()`, `exec_command()`
+- **macos/workspace.rs** - NSWorkspace app launch/terminate notifications, display change notifications, `activate_application()`, `get_frontmost_app_pid()`, `exec_command()`
 - **macos/hotkey.rs** - CGEventTap global hotkeys
   - `HotkeyManager` with dynamic bind/unbind
   - Tap recreation on binding changes
 - **core/display.rs** - Display struct with visible_tags per display
 - **core/state.rs** - Window and display state management
   - Multi-monitor: `displays`, `focused_display`, per-display visible_tags
-  - Tag operations: `view_tag()`, `toggle_view_tag()`, `move_focused_to_tag()`, `toggle_focused_window_tag()`
+  - Tag operations: `view_tag()`, `toggle_view_tag_on_display()`, `move_focused_to_tag()`, `toggle_focused_window_tag()`
   - Focus: `focus_window()` - stack-based (next/prev) and geometry-based (left/right/up/down)
   - Output: `focus_output()`, `send_to_output()` - move focus/window between displays
+  - Display targeting: `resolve_output()`, `get_target_display()` - resolve OutputSpecifier to DisplayId
+  - Display change: `handle_display_change()` - handle monitor connect/disconnect
 - **core/window.rs** - Window struct with tags, display_id, saved_frame for off-screen
 - **core/tag.rs** - Tag bitmask
 - **ipc/server.rs** - IPC server on `/tmp/yashiki.sock`
@@ -215,7 +223,7 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
   - `MacOSWindowSystem` / `MacOSWindowManipulator` - Production implementations
   - `MockWindowSystem` / `MockWindowManipulator` - Test implementations
 - **main.rs** - Daemon + CLI mode
-- **yashiki-ipc/** - Command/Response/LayoutMessage enums
+- **yashiki-ipc/** - Command/Response/LayoutMessage enums, OutputSpecifier, OutputInfo
 
 ### yashiki-layout-tatami (layout engine)
 - Master-stack layout
@@ -243,10 +251,6 @@ yashiki bind alt-s exec-or-focus --app-name Safari "open -a Safari"
 ### Not Yet Implemented
 - `SwapWindow` command (swap positions with window in direction)
 - `CloseWindow` / `ToggleFloat`
-- Display specification interface (for per-display commands)
-  - Support flexible display identification: by ID, by name, by position
-  - Example: `yashiki --output "Built-in Display" set-layout tatami`
-  - Example: `yashiki --output 1 view-tag 1`
 
 ## Development Notes
 
@@ -304,11 +308,20 @@ Focus involves: `activate_application(pid)` then `AXUIElement.raise()`
 - Each `Display` has its own `visible_tags`
 - `State.focused_display` tracks which display has focus
 - Focus changes update `focused_display` based on window's `display_id`
-- Tag operations (`view_tag`, etc.) affect only `focused_display`
+- Tag operations (`view_tag`, etc.) affect only `focused_display` by default
+- `--output` option allows targeting specific display by ID or name (partial match)
 - Window's display determined by center point location
 - Layout applied independently per display with display offset
 - `focus_output`: cycles displays by sorted ID, focuses first visible window on target
 - `send_to_output`: moves window to target display, updates `focused_display`, retiles both displays
+
+### Monitor Disconnection Handling
+- Listens for `NSApplicationDidChangeScreenParametersNotification`
+- When a display is disconnected:
+  - Orphaned windows are moved to fallback display (main display preferred)
+  - `focused_display` is updated if it was on the disconnected display
+  - Affected displays are automatically retiled
+- `handle_display_change()` in State handles the logic
 
 ### Window Hiding (AeroSpace-style)
 - Hidden windows are moved to screen's bottom-right corner (top-left of window at bottom-right of screen)
