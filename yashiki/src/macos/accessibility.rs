@@ -57,6 +57,7 @@ extern "C" {
         value: *const c_void,
     ) -> AXError;
     fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
+    fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
     fn AXValueCreate(value_type: u32, value: *const c_void) -> *mut c_void;
     fn AXValueGetValue(value: *const c_void, value_type: u32, value_ptr: *mut c_void) -> bool;
 
@@ -81,6 +82,10 @@ extern "C" {
 
 const AX_VALUE_TYPE_CGPOINT: u32 = 1;
 const AX_VALUE_TYPE_CGSIZE: u32 = 2;
+
+mod action {
+    pub const RAISE: &str = "AXRaise";
+}
 
 mod attr {
     pub const WINDOWS: &str = "AXWindows";
@@ -271,6 +276,18 @@ impl AXUIElement {
     pub fn focused_application(&self) -> Result<AXUIElement, AXError> {
         let value = self.get_attribute(attr::FOCUSED_APPLICATION)?;
         Ok(unsafe { AXUIElement::wrap_under_create_rule(value as AXUIElementRef) })
+    }
+
+    pub fn raise(&self) -> Result<(), AXError> {
+        let action = CFString::new(action::RAISE);
+        let err = unsafe {
+            AXUIElementPerformAction(self.as_concrete_TypeRef(), action.as_concrete_TypeRef())
+        };
+        if err == AX_ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(err)
+        }
     }
 }
 

@@ -2,6 +2,7 @@ use super::{offscreen_x, Rect, Tag, Window, WindowId};
 use crate::event::Event;
 use crate::macos::{get_focused_window, get_on_screen_windows, WindowInfo};
 use std::collections::{HashMap, HashSet};
+use yashiki_ipc::Direction;
 
 #[derive(Debug, Clone)]
 pub struct WindowMove {
@@ -271,6 +272,104 @@ impl State {
             window.tags = new_tags;
         }
         self.compute_layout_changes()
+    }
+
+    pub fn focus_window(&self, direction: Direction) -> Option<(WindowId, i32)> {
+        let visible: Vec<_> = self
+            .windows
+            .values()
+            .filter(|w| w.tags.intersects(self.visible_tags) && !w.is_offscreen())
+            .collect();
+
+        if visible.is_empty() {
+            return None;
+        }
+
+        match direction {
+            Direction::Next | Direction::Prev => {
+                self.focus_window_stack(&visible, direction == Direction::Next)
+            }
+            Direction::Left | Direction::Right | Direction::Up | Direction::Down => {
+                self.focus_window_directional(&visible, direction)
+            }
+        }
+    }
+
+    fn focus_window_stack(&self, visible: &[&Window], forward: bool) -> Option<(WindowId, i32)> {
+        if visible.is_empty() {
+            return None;
+        }
+
+        // Sort by window ID for consistent ordering
+        let mut sorted: Vec<_> = visible.iter().map(|w| (w.id, w.pid)).collect();
+        sorted.sort_by_key(|(id, _)| *id);
+
+        let current_idx = self
+            .focused
+            .and_then(|id| sorted.iter().position(|(wid, _)| *wid == id));
+
+        let next_idx = match current_idx {
+            Some(idx) => {
+                if forward {
+                    (idx + 1) % sorted.len()
+                } else {
+                    (idx + sorted.len() - 1) % sorted.len()
+                }
+            }
+            None => 0,
+        };
+
+        Some(sorted[next_idx])
+    }
+
+    fn focus_window_directional(
+        &self,
+        visible: &[&Window],
+        direction: Direction,
+    ) -> Option<(WindowId, i32)> {
+        let focused_id = self.focused?;
+        let focused = visible.iter().find(|w| w.id == focused_id)?;
+
+        // Center point of focused window
+        let fx = focused.frame.x + focused.frame.width as i32 / 2;
+        let fy = focused.frame.y + focused.frame.height as i32 / 2;
+
+        let mut best: Option<(&Window, i32)> = None;
+
+        for window in visible {
+            if window.id == focused_id {
+                continue;
+            }
+
+            let wx = window.frame.x + window.frame.width as i32 / 2;
+            let wy = window.frame.y + window.frame.height as i32 / 2;
+
+            let is_candidate = match direction {
+                Direction::Left => wx < fx,
+                Direction::Right => wx > fx,
+                Direction::Up => wy < fy,
+                Direction::Down => wy > fy,
+                _ => false,
+            };
+
+            if !is_candidate {
+                continue;
+            }
+
+            let distance = (wx - fx).abs() + (wy - fy).abs();
+
+            match &best {
+                Some((_, best_dist)) if distance < *best_dist => {
+                    best = Some((window, distance));
+                }
+                None => {
+                    best = Some((window, distance));
+                }
+                _ => {}
+            }
+        }
+
+        best.map(|(w, _)| (w.id, w.pid))
     }
 
     fn compute_layout_changes(&mut self) -> Vec<WindowMove> {

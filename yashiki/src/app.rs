@@ -4,8 +4,8 @@ use crate::ipc::IpcServer;
 use crate::layout::LayoutEngine;
 use crate::macos;
 use crate::macos::{
-    get_main_display_size, AXUIElement, HotkeyManager, ObserverManager, WorkspaceEvent,
-    WorkspaceWatcher,
+    activate_application, get_main_display_size, AXUIElement, HotkeyManager, ObserverManager,
+    WorkspaceEvent, WorkspaceWatcher,
 };
 use anyhow::Result;
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
@@ -407,6 +407,14 @@ fn handle_ipc_command(
                 .collect();
             Response::Bindings { bindings }
         }
+        Command::FocusWindow { direction } => {
+            let state = state.borrow();
+            if let Some((window_id, pid)) = state.focus_window(*direction) {
+                tracing::info!("Focusing window {} (pid {})", window_id, pid);
+                focus_window_by_id(&state, window_id, pid);
+            }
+            Response::Ok
+        }
         Command::Quit => {
             tracing::info!("Quit command received");
             Response::Ok
@@ -418,6 +426,58 @@ fn handle_ipc_command(
             }
         }
     }
+}
+
+fn focus_window_by_id(state: &State, window_id: u32, pid: i32) {
+    // Activate the application first
+    activate_application(pid);
+
+    // Get the target window's position/size for matching
+    let window = match state.windows.get(&window_id) {
+        Some(w) => w,
+        None => return,
+    };
+
+    // Get AX windows and find the matching one
+    let app = AXUIElement::application(pid);
+    let ax_windows = match app.windows() {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("Failed to get windows for pid {}: {}", pid, e);
+            return;
+        }
+    };
+
+    for ax_win in &ax_windows {
+        let pos = match ax_win.position() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let size = match ax_win.size() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let pos_match = (pos.x - window.frame.x as f64).abs() < 10.0
+            && (pos.y - window.frame.y as f64).abs() < 10.0;
+        let size_match = (size.width - window.frame.width as f64).abs() < 10.0
+            && (size.height - window.frame.height as f64).abs() < 10.0;
+
+        if pos_match && size_match {
+            if let Err(e) = ax_win.raise() {
+                tracing::warn!("Failed to raise window {}: {}", window_id, e);
+            } else {
+                tracing::debug!("Raised window {} (pid {})", window_id, pid);
+            }
+            return;
+        }
+    }
+
+    tracing::warn!(
+        "Could not find matching AX window for id {} (pid {})",
+        window_id,
+        pid
+    );
 }
 
 fn apply_window_moves(moves: &[WindowMove]) {

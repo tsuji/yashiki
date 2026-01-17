@@ -1,10 +1,23 @@
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, DefinedClass};
-use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
 use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString};
 use std::cell::RefCell;
 use std::sync::mpsc as std_mpsc;
+
+#[allow(deprecated)]
+pub fn activate_application(pid: i32) -> bool {
+    let workspace = NSWorkspace::sharedWorkspace();
+    let apps = workspace.runningApplications();
+    for app in apps {
+        if app.processIdentifier() == pid {
+            return app
+                .activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+        }
+    }
+    false
+}
 
 #[derive(Debug, Clone)]
 pub enum WorkspaceEvent {
