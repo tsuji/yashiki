@@ -126,13 +126,16 @@ impl App {
         state.sync_all();
 
         // Spawn layout engine
-        let layout_engine = match LayoutEngine::spawn("tatami") {
+        let mut layout_engine = match LayoutEngine::spawn("tatami") {
             Ok(engine) => Some(engine),
             Err(e) => {
                 tracing::warn!("Failed to spawn layout engine: {}", e);
                 None
             }
         };
+
+        // Initial retile
+        do_retile(&state, &mut layout_engine);
 
         // Create hotkey manager
         let (hotkey_cmd_tx, hotkey_cmd_rx) = std_mpsc::channel::<Command>();
