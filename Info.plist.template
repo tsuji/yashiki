@@ -5,7 +5,7 @@
     <key>CFBundleExecutable</key>
     <string>yashiki</string>
     <key>CFBundleIdentifier</key>
-    <string>com.typester.yashiki</string>
+    <string>dev.typester.yashiki</string>
     <key>CFBundleName</key>
     <string>Yashiki</string>
     <key>CFBundleVersion</key>
