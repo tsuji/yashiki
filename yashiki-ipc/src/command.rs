@@ -85,6 +85,16 @@ pub enum Command {
         command: String,
     },
 
+    // Exec path
+    GetExecPath,
+    SetExecPath {
+        path: String,
+    },
+    AddExecPath {
+        path: String,
+        append: bool,
+    },
+
     // Control
     Quit,
 }
@@ -125,6 +135,7 @@ pub enum Response {
     Bindings { bindings: Vec<BindingInfo> },
     WindowId { id: Option<u32> },
     Layout { layout: String },
+    ExecPath { path: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,6 +501,90 @@ mod tests {
             Response::Bindings { bindings } => {
                 assert_eq!(bindings.len(), 1);
                 assert_eq!(bindings[0].key, "alt-1");
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_command_get_exec_path_serialization() {
+        let cmd = Command::GetExecPath;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"get_exec_path\""));
+
+        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, Command::GetExecPath));
+    }
+
+    #[test]
+    fn test_command_set_exec_path_serialization() {
+        let cmd = Command::SetExecPath {
+            path: "/opt/homebrew/bin:/usr/local/bin".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"set_exec_path\""));
+        assert!(json.contains("\"path\":\"/opt/homebrew/bin:/usr/local/bin\""));
+
+        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Command::SetExecPath { path } => {
+                assert_eq!(path, "/opt/homebrew/bin:/usr/local/bin");
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_command_add_exec_path_serialization() {
+        // Prepend (default)
+        let cmd = Command::AddExecPath {
+            path: "/opt/homebrew/bin".to_string(),
+            append: false,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"add_exec_path\""));
+        assert!(json.contains("\"append\":false"));
+
+        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Command::AddExecPath { path, append } => {
+                assert_eq!(path, "/opt/homebrew/bin");
+                assert!(!append);
+            }
+            _ => panic!("Wrong variant"),
+        }
+
+        // Append
+        let cmd = Command::AddExecPath {
+            path: "/usr/local/bin".to_string(),
+            append: true,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"append\":true"));
+
+        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Command::AddExecPath { path, append } => {
+                assert_eq!(path, "/usr/local/bin");
+                assert!(append);
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_response_exec_path_serialization() {
+        let resp = Response::ExecPath {
+            path: "/opt/homebrew/bin:/usr/local/bin".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"type\":\"exec_path\""));
+        assert!(json.contains("\"path\":\"/opt/homebrew/bin:/usr/local/bin\""));
+
+        let deserialized: Response = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Response::ExecPath { path } => {
+                assert_eq!(path, "/opt/homebrew/bin:/usr/local/bin");
             }
             _ => panic!("Wrong variant"),
         }

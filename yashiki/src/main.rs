@@ -51,6 +51,9 @@ enum SubCommand {
     FocusedWindow(FocusedWindowCmd),
     Exec(ExecCmd),
     ExecOrFocus(ExecOrFocusCmd),
+    ExecPath(ExecPathCmd),
+    SetExecPath(SetExecPathCmd),
+    AddExecPath(AddExecPathCmd),
     Quit(QuitCmd),
 }
 
@@ -274,6 +277,32 @@ struct ExecOrFocusCmd {
     command: String,
 }
 
+/// Get the current exec path
+#[derive(FromArgs)]
+#[argh(subcommand, name = "exec-path")]
+struct ExecPathCmd {}
+
+/// Set the exec path
+#[derive(FromArgs)]
+#[argh(subcommand, name = "set-exec-path")]
+struct SetExecPathCmd {
+    /// the path to set
+    #[argh(positional)]
+    path: String,
+}
+
+/// Add a path to exec path
+#[derive(FromArgs)]
+#[argh(subcommand, name = "add-exec-path")]
+struct AddExecPathCmd {
+    /// append to end instead of prepending to start
+    #[argh(switch)]
+    append: bool,
+    /// the path to add
+    #[argh(positional)]
+    path: String,
+}
+
 /// Quit the yashiki daemon
 #[derive(FromArgs)]
 #[argh(subcommand, name = "quit")]
@@ -376,6 +405,9 @@ fn run_cli(subcmd: SubCommand) -> Result<()> {
         Response::Layout { layout } => {
             println!("{}", layout);
         }
+        Response::ExecPath { path } => {
+            println!("{}", path);
+        }
     }
 
     Ok(())
@@ -449,6 +481,12 @@ fn to_command(subcmd: SubCommand) -> Result<Command> {
         SubCommand::ExecOrFocus(cmd) => Ok(Command::ExecOrFocus {
             app_name: cmd.app_name,
             command: cmd.command,
+        }),
+        SubCommand::ExecPath(_) => Ok(Command::GetExecPath),
+        SubCommand::SetExecPath(cmd) => Ok(Command::SetExecPath { path: cmd.path }),
+        SubCommand::AddExecPath(cmd) => Ok(Command::AddExecPath {
+            path: cmd.path,
+            append: cmd.append,
         }),
         SubCommand::Quit(_) => Ok(Command::Quit),
     }
@@ -578,6 +616,18 @@ fn parse_command(args: &[String]) -> Result<Command> {
             Ok(Command::ExecOrFocus {
                 app_name: cmd.app_name,
                 command: cmd.command,
+            })
+        }
+        "exec-path" => Ok(Command::GetExecPath),
+        "set-exec-path" => {
+            let cmd: SetExecPathCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::SetExecPath { path: cmd.path })
+        }
+        "add-exec-path" => {
+            let cmd: AddExecPathCmd = from_argh(cmd_name, &cmd_args)?;
+            Ok(Command::AddExecPath {
+                path: cmd.path,
+                append: cmd.append,
             })
         }
         "quit" => Ok(Command::Quit),
