@@ -485,6 +485,7 @@ Each group should be sorted alphabetically. Module declarations (`mod`, `pub mod
 - Update documentation when adding/changing features:
   - `README.md` - User-facing documentation (features, CLI usage, examples)
   - `CLAUDE.md` - Developer documentation (architecture, implementation details, test coverage)
+  - `docs/*.md` - User-facing detailed documentation (window rules, workarounds, etc.)
 
 ## Design Decisions
 
@@ -609,11 +610,42 @@ Focus involves: `activate_application(pid)` then `AXUIElement.raise()`
 - Implementation: yashiki subtracts outer gap from dimensions before sending to layout engines, then adds offset when applying geometries
 - CSS-style syntax: `<all>` | `<v h>` | `<t r b l>`
 
+### Layer-Based Window Filtering
+- **Default behavior**: Windows with non-normal layer (CGWindowLevel != 0) are NOT managed by default
+- **Override with rules**: Any non-ignore rule matching the window will cause it to be managed
+- **Non-normal layer windows default to floating** when managed (can override with `no-float` rule)
+- This allows managing modal dialogs, utility panels, etc. via rules like `--window-level modal float`
+- Similar behavior to river: any matching rule (float, tags, output, etc.) will manage the window
+
+| Window Level | Rule | Result |
+|--------------|------|--------|
+| normal (0) | (none) | Managed, tiled |
+| normal (0) | `--app-id X float` | Managed, floating |
+| normal (0) | `--app-id X ignore` | Ignored |
+| modal (8) | (none) | **Not managed** |
+| modal (8) | `--app-id X float` | **Managed, floating** |
+| modal (8) | `--app-id X tags 2` | **Managed, floating** (default for non-normal layer) |
+| modal (8) | `--app-id X no-float` | **Managed, tiled** (explicit override) |
+| modal (8) | `--app-id X ignore` | Ignored |
+| modal (8) | `--window-level modal float` | **Managed, floating** |
+
+Example rules:
+```sh
+# Manage Raycast (modal window) as floating
+yashiki rule-add --app-id com.raycast.macos float
+
+# Manage all modal windows as floating
+yashiki rule-add --window-level modal float
+
+# Manage all floating level windows (utility panels)
+yashiki rule-add --window-level floating float
+```
+
 ### Popup Window Filtering (Configurable via Rules)
 - Problem: Some apps (Firefox, etc.) create temporary popup windows (dropdowns, tooltips) that trigger layout recalculation
 - Solution: Use `ignore` rule action to skip specific windows based on AX attributes
 - `try_create_window()` helper checks `should_ignore_window()` before creating Window objects (used by both `sync_pid` and `sync_all`)
-- Debug logging: `RUST_LOG=yashiki=debug` shows all discovered windows with their AX attributes
+- Use `list-windows --all --debug` to inspect all windows (including ignored ones) with their AX attributes
 - Example rules:
   ```sh
   # Ignore all AXUnknown windows (Firefox dropdowns, tooltips, etc.)
@@ -633,7 +665,7 @@ Run tests: `cargo test --all`
 - `core/tag.rs` - Tag bitmask operations (7 tests)
 - `macos/hotkey.rs` - `parse_hotkey()`, `format_hotkey()` (15 tests)
 - `yashiki-ipc` - Command/Response/LayoutMessage/WindowRule/StateEvent/OuterGap serialization
-- `core/state.rs` - State management with MockWindowSystem (22 tests)
+- `core/state.rs` - State management with MockWindowSystem, layer filtering (30 tests)
 - `app.rs` - `process_command()` effect generation, `emit_state_change_events()` event detection (15 tests)
 - `event_emitter.rs` - `create_snapshot()`, `window_to_info()`, `display_to_info()` (3 tests)
 - `yashiki-layout-byobu` - Accordion layout and commands (9 tests)
