@@ -14,7 +14,7 @@ use core_foundation_sys::runloop::{
 use objc2_foundation::MainThreadMarker;
 use tokio::sync::mpsc;
 
-use crate::core::{State, WindowMove};
+use crate::core::{FocusOutputResult, State, WindowMove};
 use crate::effect::{CommandResult, Effect};
 use crate::event::Event;
 use crate::event_emitter::{create_snapshot, EventEmitter};
@@ -84,6 +84,7 @@ struct RunLoopContext {
     hotkey_manager: RefCell<HotkeyManager>,
     window_system: MacOSWindowSystem,
     window_manipulator: MacOSWindowManipulator,
+    previous_display_ids: RefCell<Vec<u32>>,
 }
 
 pub struct App {}
@@ -331,6 +332,9 @@ impl App {
             tracing::warn!("Failed to start hotkey tap: {}", e);
         }
 
+        // Get initial display IDs for polling-based display change detection
+        let initial_display_ids = macos::get_active_display_ids();
+
         // Create shared context for timer and IPC source
         let context = Box::new(RunLoopContext {
             ipc_cmd_rx,
@@ -346,6 +350,7 @@ impl App {
             hotkey_manager: RefCell::new(hotkey_manager),
             window_system,
             window_manipulator,
+            previous_display_ids: RefCell::new(initial_display_ids),
         });
         let context_ptr = Box::into_raw(context) as *mut std::ffi::c_void;
 
@@ -487,6 +492,62 @@ impl App {
             while let Ok(resp_tx) = ctx.snapshot_request_rx.try_recv() {
                 let snapshot = create_snapshot(&ctx.state.borrow());
                 let _ = resp_tx.send(snapshot);
+            }
+
+            // Poll for display changes using CGGetActiveDisplayList
+            // NSApplicationDidChangeScreenParametersNotification doesn't work without NSApplication's event loop
+            {
+                let current_ids = macos::get_active_display_ids();
+                let mut prev_ids = ctx.previous_display_ids.borrow_mut();
+
+                let mut current_sorted = current_ids.clone();
+                let mut prev_sorted = prev_ids.clone();
+                current_sorted.sort();
+                prev_sorted.sort();
+
+                if current_sorted != prev_sorted {
+                    tracing::info!("Display configuration changed (polling)");
+                    *prev_ids = current_ids;
+
+                    let result = ctx
+                        .state
+                        .borrow_mut()
+                        .handle_display_change(&ctx.window_system);
+
+                    // Emit display events
+                    let focused_display = ctx.state.borrow().focused_display;
+                    for display in &result.added {
+                        ctx.event_emitter
+                            .emit_display_added(display, focused_display);
+                    }
+                    for display_id in &result.removed {
+                        ctx.event_emitter.emit_display_removed(*display_id);
+                    }
+
+                    // Apply window moves for orphaned windows
+                    if !result.window_moves.is_empty() {
+                        ctx.window_manipulator
+                            .apply_window_moves(&result.window_moves);
+                    }
+
+                    // Retile affected displays
+                    if !result.displays_to_retile.is_empty() {
+                        for display_id in result.displays_to_retile {
+                            do_retile_display(
+                                &ctx.state,
+                                &ctx.layout_engine_manager,
+                                &ctx.window_manipulator,
+                                display_id,
+                            );
+                        }
+                    } else {
+                        do_retile(
+                            &ctx.state,
+                            &ctx.layout_engine_manager,
+                            &ctx.window_manipulator,
+                        );
+                    }
+                }
             }
 
             // Process workspace events (app launch/terminate/display change)
@@ -1048,19 +1109,21 @@ fn process_command(
                 CommandResult::ok()
             }
         }
-        Command::OutputFocus { direction } => {
-            let result = state.focus_output(*direction);
-            if let Some((window_id, pid)) = result {
+        Command::OutputFocus { direction } => match state.focus_output(*direction) {
+            Some(FocusOutputResult::Window { window_id, pid }) => {
                 tracing::info!("Focusing output - window {} (pid {})", window_id, pid);
                 CommandResult::ok_with_effects(vec![Effect::FocusWindow {
                     window_id,
                     pid,
                     is_output_change: true,
                 }])
-            } else {
-                CommandResult::ok()
             }
-        }
+            Some(FocusOutputResult::EmptyDisplay { display_id }) => {
+                tracing::info!("Focusing output - empty display {}", display_id);
+                CommandResult::ok_with_effects(vec![Effect::WarpCursorToDisplay { display_id }])
+            }
+            None => CommandResult::ok(),
+        },
 
         // Fullscreen toggle
         Command::WindowToggleFullscreen => {
@@ -1501,6 +1564,19 @@ fn execute_effects<M: WindowManipulator>(
             }
             Effect::FocusVisibleWindowIfNeeded => {
                 focus_visible_window_if_needed(state, manipulator);
+            }
+            Effect::WarpCursorToDisplay { display_id } => {
+                let cursor_warp_mode = state.borrow().cursor_warp;
+                let should_warp = match cursor_warp_mode {
+                    CursorWarpMode::Disabled => false,
+                    CursorWarpMode::OnOutputChange | CursorWarpMode::OnFocusChange => true,
+                };
+                if should_warp {
+                    if let Some(display) = state.borrow().displays.get(&display_id) {
+                        let (cx, cy) = display.frame.center();
+                        manipulator.warp_cursor(cx, cy);
+                    }
+                }
             }
         }
     }
@@ -2697,5 +2773,112 @@ mod tests {
 
         assert!(matches!(result.response, Response::Ok));
         assert!(result.effects.is_empty());
+    }
+
+    #[test]
+    fn test_output_focus_with_window_produces_focus_effect() {
+        use yashiki_ipc::OutputDirection;
+
+        let ws = MockWindowSystem::new()
+            .with_displays(vec![
+                create_test_display(1, 0.0, 0.0, 1920.0, 1080.0),
+                create_test_display(2, 1920.0, 0.0, 1920.0, 1080.0),
+            ])
+            .with_windows(vec![
+                create_test_window(100, 1000, "Safari", 100.0, 100.0, 800.0, 600.0),
+                create_test_window(101, 1001, "Terminal", 2000.0, 100.0, 800.0, 600.0),
+            ])
+            .with_focused(Some(100));
+
+        let mut state = State::new();
+        state.sync_all(&ws);
+
+        let (tx, _rx) = std_mpsc::channel();
+        let dummy_source = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
+        let mut hotkey_manager = HotkeyManager::new(tx, dummy_source);
+
+        let result = process_command(
+            &mut state,
+            &mut hotkey_manager,
+            &Command::OutputFocus {
+                direction: OutputDirection::Next,
+            },
+        );
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.effects.len(), 1);
+
+        match &result.effects[0] {
+            Effect::FocusWindow {
+                window_id,
+                pid,
+                is_output_change,
+            } => {
+                assert_eq!(*window_id, 101);
+                assert_eq!(*pid, 1001);
+                assert!(is_output_change);
+            }
+            _ => panic!("Expected FocusWindow effect"),
+        }
+    }
+
+    #[test]
+    fn test_output_focus_empty_display_produces_warp_cursor_effect() {
+        use yashiki_ipc::OutputDirection;
+
+        let ws = MockWindowSystem::new()
+            .with_displays(vec![
+                create_test_display(1, 0.0, 0.0, 1920.0, 1080.0),
+                create_test_display(2, 1920.0, 0.0, 1920.0, 1080.0),
+            ])
+            .with_windows(vec![
+                // Only window on display 1
+                create_test_window(100, 1000, "Safari", 100.0, 100.0, 800.0, 600.0),
+            ])
+            .with_focused(Some(100));
+
+        let mut state = State::new();
+        state.sync_all(&ws);
+
+        let (tx, _rx) = std_mpsc::channel();
+        let dummy_source = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
+        let mut hotkey_manager = HotkeyManager::new(tx, dummy_source);
+
+        let result = process_command(
+            &mut state,
+            &mut hotkey_manager,
+            &Command::OutputFocus {
+                direction: OutputDirection::Next,
+            },
+        );
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.effects.len(), 1);
+
+        match &result.effects[0] {
+            Effect::WarpCursorToDisplay { display_id } => {
+                assert_eq!(*display_id, 2);
+            }
+            _ => panic!(
+                "Expected WarpCursorToDisplay effect, got {:?}",
+                result.effects[0]
+            ),
+        }
+    }
+
+    #[test]
+    fn test_rect_center() {
+        use crate::core::Rect;
+
+        let rect = Rect {
+            x: 100,
+            y: 200,
+            width: 800,
+            height: 600,
+        };
+
+        let (cx, cy) = rect.center();
+        assert_eq!(cx, 500); // 100 + 800/2
+        assert_eq!(cy, 500); // 200 + 600/2
     }
 }
