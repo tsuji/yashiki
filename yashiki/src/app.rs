@@ -631,6 +631,14 @@ impl App {
                                 &ctx.window_manipulator,
                             );
                         }
+
+                        // Sync focused window in case we missed the ApplicationActivated event
+                        // (can happen if the app was activated before the observer was ready)
+                        ctx.state
+                            .borrow_mut()
+                            .sync_focused_window_with_hint(&ctx.window_system, Some(pid));
+                        ctx.event_emitter
+                            .emit_window_focused(ctx.state.borrow().focused);
                     }
                     WorkspaceEvent::AppTerminated { pid } => {
                         tracing::info!("App terminated, removing observer for pid {}", pid);
@@ -779,10 +787,14 @@ impl App {
                         }
                     }
 
-                    // Only switch tag if focus actually changed (prevents unwanted tag switch
-                    // when accessory apps like Raycast are activated)
-                    let focus_changed =
-                        prev_focused.map(|prev| prev != focused_id).unwrap_or(false);
+                    // Only switch tag if focus changed from one window to another.
+                    // This prevents unwanted tag switch when:
+                    // 1. Accessory apps like Raycast are activated (prev_focused is None)
+                    // 2. App terminates and macOS auto-activates another app (prev was None)
+                    let focus_changed = match prev_focused {
+                        Some(Some(prev_id)) => Some(prev_id) != focused_id,
+                        _ => false,
+                    };
                     if focus_changed {
                         let moves = switch_tag_for_focused_window(&ctx.state);
                         if let Some(moves) = moves {
@@ -1985,6 +1997,10 @@ fn focus_visible_window_if_needed<M: WindowManipulator>(state: &RefCell<State>, 
     if let Some((window_id, pid, (cx, cy))) = window_to_focus {
         tracing::info!("Focusing visible window {} after tag switch", window_id);
         manipulator.focus_window(window_id, pid);
+
+        // Update internal state immediately after focusing
+        // This ensures emit_state_change_events will detect the focus change
+        state.borrow_mut().set_focused(Some(window_id));
 
         // Warp cursor if OnFocusChange mode (not OnOutputChange since this is not an output change)
         if cursor_warp_mode == CursorWarpMode::OnFocusChange {
