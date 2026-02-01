@@ -41,10 +41,16 @@ pub fn focus_visible_window_if_needed<M: WindowManipulator>(
             return;
         }
 
-        // Focus the first visible window (prefer tiled, then fullscreen, then floating)
-        let window = all_visible
-            .iter()
-            .find(|w| w.is_tiled())
+        // Try to restore focus from tag_focus
+        let restored_window = display
+            .visible_tags
+            .first_tag()
+            .and_then(|tag| display.tag_focus.get(&tag))
+            .and_then(|id| all_visible.iter().find(|w| w.id == *id));
+
+        // Focus the first visible window (prefer restored, then tiled, then fullscreen, then floating)
+        let window = restored_window
+            .or_else(|| all_visible.iter().find(|w| w.is_tiled()))
             .or_else(|| all_visible.iter().find(|w| w.is_fullscreen))
             .or_else(|| all_visible.first());
 

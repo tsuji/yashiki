@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::macos::DisplayId;
 
 use super::{Rect, Tag, WindowId};
@@ -13,6 +15,7 @@ pub struct Display {
     pub window_order: Vec<WindowId>,
     pub current_layout: Option<String>,
     pub previous_layout: Option<String>,
+    pub tag_focus: HashMap<u32, WindowId>,
 }
 
 impl Display {
@@ -27,6 +30,7 @@ impl Display {
             window_order: Vec::new(),
             current_layout: None,
             previous_layout: None,
+            tag_focus: HashMap::new(),
         }
     }
 }

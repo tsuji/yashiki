@@ -3005,6 +3005,118 @@ mod tests {
     }
 
     #[test]
+    fn test_tag_focus_restoration() {
+        use super::super::Rect;
+        let mut state = State::new();
+        let display_id = 1;
+        state.displays.insert(
+            display_id,
+            Display::new(
+                display_id,
+                "Display 1".to_string(),
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                true,
+            ),
+        );
+
+        let win1_id = 100;
+        let win2_id = 200;
+        state.windows.insert(
+            win1_id,
+            Window {
+                id: win1_id,
+                pid: 1000,
+                display_id,
+                tags: Tag::new(1),
+                title: "Win1".to_string(),
+                app_name: "App1".to_string(),
+                app_id: None,
+                ax_id: None,
+                subrole: None,
+                window_level: 0,
+                close_button: Default::default(),
+                fullscreen_button: Default::default(),
+                minimize_button: Default::default(),
+                zoom_button: Default::default(),
+                frame: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 960,
+                    height: 1080,
+                },
+                saved_frame: None,
+                is_floating: false,
+                is_fullscreen: false,
+                orphaned_from: None,
+            },
+        );
+        state.windows.insert(
+            win2_id,
+            Window {
+                id: win2_id,
+                pid: 2000,
+                display_id,
+                tags: Tag::new(2),
+                title: "Win2".to_string(),
+                app_name: "App2".to_string(),
+                app_id: None,
+                ax_id: None,
+                subrole: None,
+                window_level: 0,
+                close_button: Default::default(),
+                fullscreen_button: Default::default(),
+                minimize_button: Default::default(),
+                zoom_button: Default::default(),
+                frame: Rect {
+                    x: 960,
+                    y: 0,
+                    width: 960,
+                    height: 1080,
+                },
+                saved_frame: None,
+                is_floating: false,
+                is_fullscreen: false,
+                orphaned_from: None,
+            },
+        );
+
+        state.focused_display = display_id;
+
+        // 1. Start at Tag 1, focus Win1
+        state.view_tags(1 << 0);
+        state.set_focused(Some(win1_id));
+
+        // 2. Switch to Tag 2, focus Win2
+        state.view_tags(1 << 1);
+        // Verify Win1 was saved to tag_focus for Tag 1
+        assert_eq!(
+            state.displays.get(&display_id).unwrap().tag_focus.get(&1),
+            Some(&win1_id)
+        );
+
+        state.set_focused(Some(win2_id));
+
+        // 3. Switch back to Tag 1
+        state.view_tags(1 << 0);
+        // Verify Win2 was saved to tag_focus for Tag 2
+        assert_eq!(
+            state.displays.get(&display_id).unwrap().tag_focus.get(&2),
+            Some(&win2_id)
+        );
+
+        // In a real scenario, Effect::FocusVisibleWindowIfNeeded would be processed.
+        // We can simulate it by calling the internal function directly if we had a MockManipulator here.
+        // But since this is a unit test in core/state, we mainly care about state changes.
+        // The restoration logic is in app/focus.rs which requires more setup.
+        // Let's at least verify the tag_focus mapping is correct.
+    }
+
+    #[test]
     fn test_sync_with_window_infos_respects_window_level_ax_check() {
         use sync::sync_with_window_infos;
 
