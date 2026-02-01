@@ -100,10 +100,16 @@ pub fn execute_effects<M: WindowManipulator>(
                     do_retile_display(state, layout_engine_manager, manipulator, display_id);
                 }
             }
-            Effect::SendLayoutCommand { layout, cmd, args } => {
-                let layout_name = layout
-                    .clone()
-                    .unwrap_or_else(|| state.borrow().current_layout().to_string());
+            Effect::SendLayoutCommand {
+                display_id,
+                layout,
+                cmd,
+                args,
+            } => {
+                let layout_name = layout.clone().unwrap_or_else(|| {
+                    let display_id = display_id.unwrap_or_else(|| state.borrow().focused_display);
+                    state.borrow().current_layout_for_display(display_id).to_string()
+                });
                 let mut manager = layout_engine_manager.borrow_mut();
                 if let Err(e) = manager.send_command(&layout_name, &cmd, &args) {
                     return Err(format!("Layout command failed: {}", e));

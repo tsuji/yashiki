@@ -823,6 +823,7 @@ pub struct WindowInfo {
 pub struct StateInfo {
     pub visible_tags: u32,
     pub focused_window_id: Option<u32>,
+    pub focused_output: u32,
     pub window_count: usize,
     pub default_layout: String,
     pub current_layout: Option<String>,

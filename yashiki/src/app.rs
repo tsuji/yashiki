@@ -1322,14 +1322,23 @@ mod tests {
         assert_eq!(result.effects.len(), 2);
 
         match &result.effects[0] {
-            Effect::SendLayoutCommand { layout, cmd, args } => {
+            Effect::SendLayoutCommand {
+                display_id,
+                layout,
+                cmd,
+                args,
+            } => {
+                assert_eq!(display_id, &Some(state.focused_display));
                 assert_eq!(*layout, None);
                 assert_eq!(cmd, "set-main-ratio");
                 assert_eq!(args, &vec!["0.6".to_string()]);
             }
             _ => panic!("Expected SendLayoutCommand effect"),
         }
-        assert!(matches!(result.effects[1], Effect::Retile));
+        assert!(matches!(
+            result.effects[1],
+            Effect::RetileDisplays(ref displays) if displays == &vec![state.focused_display]
+        ));
 
         // With layout option - should not retile
         let result = process_command(
@@ -1346,7 +1355,13 @@ mod tests {
         assert_eq!(result.effects.len(), 1);
 
         match &result.effects[0] {
-            Effect::SendLayoutCommand { layout, cmd, args } => {
+            Effect::SendLayoutCommand {
+                display_id,
+                layout,
+                cmd,
+                args,
+            } => {
+                assert_eq!(display_id, &Some(state.focused_display));
                 assert_eq!(*layout, Some("tatami".to_string()));
                 assert_eq!(cmd, "set-outer-gap");
                 assert_eq!(args, &vec!["10".to_string()]);
