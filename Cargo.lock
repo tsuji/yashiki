@@ -914,6 +914,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "yashiki-layout-byobu-hybrid"
+version = "0.10.2"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "yashiki-ipc",
+]
+
+[[package]]
 name = "yashiki-layout-tatami"
 version = "0.10.2"
 dependencies = [
