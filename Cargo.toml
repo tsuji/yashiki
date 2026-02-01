@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["yashiki", "yashiki-ipc", "yashiki-layout-tatami", "yashiki-layout-byobu"]
+members = ["yashiki", "yashiki-ipc", "yashiki-layout-tatami", "yashiki-layout-byobu", "yashiki-layout-byobu-hybrid"]
 
 [workspace.package]
 version = "0.10.2"

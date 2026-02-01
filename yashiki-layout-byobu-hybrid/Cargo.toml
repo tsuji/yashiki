@@ -1,0 +1,13 @@
+[package]
+name = "yashiki-layout-byobu-hybrid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hybrid layout engine for yashiki window manager"
+
+[dependencies]
+yashiki-ipc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
