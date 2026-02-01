@@ -24,6 +24,18 @@ pub fn view_tags_on_display(
     if disp.visible_tags == new_visible {
         return vec![];
     }
+
+    // Save current focus to the first tag of current visible tags
+    if let Some(focused_id) = state.focused {
+        if let Some(window) = state.windows.get(&focused_id) {
+            if window.display_id == display_id {
+                if let Some(current_first_tag) = disp.visible_tags.first_tag() {
+                    disp.tag_focus.insert(current_first_tag, focused_id);
+                }
+            }
+        }
+    }
+
     tracing::info!(
         "View tags on display {}: {} -> {}, layout: {:?} -> {}",
         display_id,
@@ -52,6 +64,18 @@ pub fn toggle_tags_on_display(
     if new_visible.mask() == 0 {
         return vec![];
     }
+
+    // Save current focus to the first tag of current visible tags
+    if let Some(focused_id) = state.focused {
+        if let Some(window) = state.windows.get(&focused_id) {
+            if window.display_id == display_id {
+                if let Some(current_first_tag) = disp.visible_tags.first_tag() {
+                    disp.tag_focus.insert(current_first_tag, focused_id);
+                }
+            }
+        }
+    }
+
     tracing::info!(
         "Toggle tags on display {}: {} -> {}",
         display_id,
@@ -64,12 +88,25 @@ pub fn toggle_tags_on_display(
 }
 
 pub fn view_tags_last(state: &mut State) -> Vec<WindowMove> {
-    let Some(disp) = state.displays.get_mut(&state.focused_display) else {
+    let display_id = state.focused_display;
+    let Some(disp) = state.displays.get_mut(&display_id) else {
         return vec![];
     };
     if disp.visible_tags == disp.previous_visible_tags {
         return vec![];
     }
+
+    // Save current focus to the first tag of current visible tags
+    if let Some(focused_id) = state.focused {
+        if let Some(window) = state.windows.get(&focused_id) {
+            if window.display_id == display_id {
+                if let Some(current_first_tag) = disp.visible_tags.first_tag() {
+                    disp.tag_focus.insert(current_first_tag, focused_id);
+                }
+            }
+        }
+    }
+
     tracing::info!(
         "View tags last on display {}: {} -> {}, layout: {:?} -> {:?}",
         state.focused_display,
