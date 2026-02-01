@@ -79,6 +79,10 @@ extern "C" {
 
     // Private API to get CGWindowID from AXUIElement
     fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> AXError;
+
+    // CFType runtime checks
+    fn CFGetTypeID(cf: *const c_void) -> CFTypeID;
+    fn CFStringGetTypeID() -> CFTypeID;
 }
 
 const AX_VALUE_TYPE_CGPOINT: u32 = 1;
@@ -186,6 +190,30 @@ impl AXUIElement {
         }
     }
 
+    fn get_attribute_string(&self, name: &str) -> Result<String, AXError> {
+        let value = self.get_attribute(name)?;
+
+        // AX attributes are not guaranteed to be CFString across all apps/windows.
+        let ty = unsafe { CFGetTypeID(value as *const c_void) };
+        let str_ty = unsafe { CFStringGetTypeID() };
+        if ty != str_ty {
+            tracing::debug!(
+                "AX attribute '{}' is not a CFString (type_id={} expected={})",
+                name,
+                ty,
+                str_ty
+            );
+            return Err(AX_ERROR_FAILURE);
+        }
+
+        let cf = unsafe { CFString::wrap_under_create_rule(value as *const _) };
+        Ok(cf.to_string())
+    }
+
+    pub fn title(&self) -> Result<String, AXError> {
+        self.get_attribute_string(attr::TITLE)
+    }
+
     fn set_attribute(&self, name: &str, value: *const c_void) -> Result<(), AXError> {
         let attr = CFString::new(name);
         let err = unsafe {
@@ -200,12 +228,6 @@ impl AXUIElement {
         } else {
             Err(err)
         }
-    }
-
-    pub fn title(&self) -> Result<String, AXError> {
-        let value = self.get_attribute(attr::TITLE)?;
-        let cf = unsafe { CFString::wrap_under_create_rule(value as *const _) };
-        Ok(cf.to_string())
     }
 
     pub fn position(&self) -> Result<CGPoint, AXError> {
@@ -346,15 +368,11 @@ impl AXUIElement {
     }
 
     pub fn subrole(&self) -> Result<String, AXError> {
-        let value = self.get_attribute(attr::SUBROLE)?;
-        let cf = unsafe { CFString::wrap_under_create_rule(value as *const _) };
-        Ok(cf.to_string())
+        self.get_attribute_string(attr::SUBROLE)
     }
 
     pub fn identifier(&self) -> Result<String, AXError> {
-        let value = self.get_attribute(attr::IDENTIFIER)?;
-        let cf = unsafe { CFString::wrap_under_create_rule(value as *const _) };
-        Ok(cf.to_string())
+        self.get_attribute_string(attr::IDENTIFIER)
     }
 
     pub fn has_close_button(&self) -> bool {
