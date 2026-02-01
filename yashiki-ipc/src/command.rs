@@ -1026,6 +1026,7 @@ mod tests {
             state: StateInfo {
                 visible_tags: 0b0011,
                 focused_window_id: Some(42),
+                focused_output: 1,
                 window_count: 5,
                 default_layout: "tatami".to_string(),
                 current_layout: Some("byobu".to_string()),
