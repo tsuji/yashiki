@@ -638,6 +638,7 @@ fn run_cli(subcmd: SubCommand) -> Result<()> {
         Response::State { state } => {
             println!("Visible tags: {}", state.visible_tags);
             println!("Focused window: {:?}", state.focused_window_id);
+            println!("Focused output: {}", state.focused_output);
             println!("Window count: {}", state.window_count);
             println!("Default layout: {}", state.default_layout);
             println!(

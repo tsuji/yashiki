@@ -114,6 +114,7 @@ pub fn process_command(
             state: StateInfo {
                 visible_tags: state.visible_tags().mask(),
                 focused_window_id: state.focused,
+                focused_output: state.focused_display,
                 window_count: state.windows.len(),
                 default_layout: state.default_layout.clone(),
                 current_layout: state
@@ -338,14 +339,16 @@ pub fn process_command(
 
         // Layout commands - need layout engine interaction (handled as effects)
         Command::LayoutCommand { layout, cmd, args } => {
+            let target_display = state.focused_display;
             let mut effects = vec![Effect::SendLayoutCommand {
+                display_id: Some(target_display),
                 layout: layout.clone(),
                 cmd: cmd.clone(),
                 args: args.clone(),
             }];
             // Only retile if targeting current layout (layout is None)
             if layout.is_none() {
-                effects.push(Effect::Retile);
+                effects.push(Effect::RetileDisplays(vec![target_display]));
             }
             CommandResult::ok_with_effects(effects)
         }

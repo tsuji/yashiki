@@ -15,7 +15,9 @@ pub fn view_tags_on_display(
 ) -> Vec<WindowMove> {
     let new_visible = Tag::from_mask(tags);
     let first_tag = new_visible.first_tag().unwrap_or(1);
-    let new_layout = state.resolve_layout_for_tag(first_tag as u8).to_string();
+    let new_layout = state
+        .resolve_layout_for_tag(display_id, first_tag as u8)
+        .to_string();
     let Some(disp) = state.displays.get_mut(&display_id) else {
         return vec![];
     };

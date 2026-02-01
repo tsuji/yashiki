@@ -122,7 +122,7 @@ pub struct State {
     pub focused_display: DisplayId,
     pub(crate) default_tag: Tag,
     pub default_layout: String,
-    pub tag_layouts: HashMap<u8, String>,
+    pub tag_layouts: HashMap<(DisplayId, u8), String>,
     pub rules_engine: RulesEngine,
     pub tracked_processes: Vec<TrackedProcess>,
     pub config: Config,
@@ -172,8 +172,27 @@ impl State {
         match tags {
             Some(tags) => {
                 let first_tag = Tag::from_mask(tags).first_tag().unwrap_or(1);
-                tracing::info!("Set layout for tag {}: {}", first_tag, layout);
-                self.tag_layouts.insert(first_tag as u8, layout);
+                tracing::info!(
+                    "Set layout for tag {} on display {}: {}",
+                    first_tag,
+                    target_display,
+                    layout
+                );
+                self.tag_layouts
+                    .insert((target_display, first_tag as u8), layout.clone());
+
+                // Update current_layout if the tag is currently visible
+                if let Some(disp) = self.displays.get_mut(&target_display) {
+                    if disp.visible_tags.intersects(Tag::from_mask(tags)) {
+                        tracing::info!(
+                            "Updating current layout for display {} to {}",
+                            target_display,
+                            layout
+                        );
+                        disp.previous_layout = disp.current_layout.take();
+                        disp.current_layout = Some(layout);
+                    }
+                }
             }
             None => {
                 let Some(disp) = self.displays.get(&target_display) else {
@@ -186,7 +205,8 @@ impl State {
                         target_display,
                         layout
                     );
-                    self.tag_layouts.insert(current_tag as u8, layout.clone());
+                    self.tag_layouts
+                        .insert((target_display, current_tag as u8), layout.clone());
                 }
                 let disp = self.displays.get_mut(&target_display).unwrap();
                 disp.previous_layout = disp.current_layout.take();
@@ -201,15 +221,15 @@ impl State {
         match tags {
             Some(tags) => {
                 let first_tag = Tag::from_mask(tags).first_tag().unwrap_or(1);
-                self.resolve_layout_for_tag(first_tag as u8)
+                self.resolve_layout_for_tag(target_display, first_tag as u8)
             }
             None => self.current_layout_for_display(target_display),
         }
     }
 
-    pub fn resolve_layout_for_tag(&self, tag: u8) -> &str {
+    pub fn resolve_layout_for_tag(&self, display_id: DisplayId, tag: u8) -> &str {
         self.tag_layouts
-            .get(&tag)
+            .get(&(display_id, tag))
             .map(|s| s.as_str())
             .unwrap_or(&self.default_layout)
     }
@@ -2412,6 +2432,99 @@ mod tests {
         assert!(new_ids.is_empty());
         assert!(state.windows.is_empty());
         assert!(state.ignored_windows.contains_key(&100));
+    }
+
+    #[test]
+    fn test_layout_set_updates_current_layout_if_tag_visible() {
+        use crate::core::Rect;
+        let mut state = State::new();
+        let d1 = 1;
+        state.displays.insert(
+            d1,
+            Display::new(
+                d1,
+                "D1".to_string(),
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1000,
+                    height: 1000,
+                },
+                true,
+            ),
+        );
+
+        // Initially default
+        assert_eq!(state.current_layout_for_display(d1), state.default_layout);
+
+        // Set layout for tag 1 (which is visible by default)
+        state.set_layout_on_display(Some(1), Some(d1), "byobu".to_string());
+
+        // Should be updated immediately
+        assert_eq!(state.current_layout_for_display(d1), "byobu");
+        assert_eq!(state.resolve_layout_for_tag(d1, 1), "byobu");
+
+        // Set layout for tag 2 (not visible)
+        state.set_layout_on_display(Some(2), Some(d1), "tatami".to_string());
+
+        // Current layout should still be byobu
+        assert_eq!(state.current_layout_for_display(d1), "byobu");
+        assert_eq!(state.resolve_layout_for_tag(d1, 2), "tatami");
+    }
+
+    #[test]
+    fn test_multi_display_tag_layouts() {
+        use crate::core::Rect;
+        let mut state = State::new();
+        let d1 = 1;
+        let d2 = 2;
+        state.displays.insert(
+            d1,
+            Display::new(
+                d1,
+                "D1".to_string(),
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1000,
+                    height: 1000,
+                },
+                true,
+            ),
+        );
+        state.displays.insert(
+            d2,
+            Display::new(
+                d2,
+                "D2".to_string(),
+                Rect {
+                    x: 1000,
+                    y: 0,
+                    width: 1000,
+                    height: 1000,
+                },
+                false,
+            ),
+        );
+
+        // Set layout for tag 1 on D1
+        state.set_layout_on_display(Some(1), Some(d1), "tatami".to_string());
+        // Set layout for tag 1 on D2
+        state.set_layout_on_display(Some(1), Some(d2), "byobu".to_string());
+
+        assert_eq!(state.resolve_layout_for_tag(d1, 1), "tatami");
+        assert_eq!(state.resolve_layout_for_tag(d2, 1), "byobu");
+
+        // Default layout for other tags
+        assert_eq!(state.resolve_layout_for_tag(d1, 2), state.default_layout);
+        assert_eq!(state.resolve_layout_for_tag(d2, 2), state.default_layout);
+
+        // Set layout for current tag on D2 without specifying tag ID
+        state.focused_display = d2;
+        state.set_layout_on_display(None, None, "floating".to_string());
+        assert_eq!(state.resolve_layout_for_tag(d2, 1), "floating");
+        // D1 should remain unchanged
+        assert_eq!(state.resolve_layout_for_tag(d1, 1), "tatami");
     }
 
     #[test]
