@@ -203,6 +203,7 @@ impl AXUIElement {
                 ty,
                 str_ty
             );
+            unsafe { core_foundation::base::CFRelease(value as *const _) };
             return Err(AX_ERROR_FAILURE);
         }
 
